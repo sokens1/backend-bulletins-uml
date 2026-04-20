@@ -1,10 +1,10 @@
 import { Injectable, NotFoundException } from '@nestjs/common';
-import { PrismaService } from '../database/prisma.service';
+import { DatabaseService } from '../database/database.service';
 import { EnterGradeDto, EnterAttendanceDto } from './dto/grades.dto';
 
 @Injectable()
 export class GradesService {
-  constructor(private prisma: PrismaService) {}
+  constructor(private prisma: DatabaseService) {}
 
   async enterGrade(dto: EnterGradeDto) {
     const student = await this.prisma.student.findUnique({ where: { id: dto.studentId } });

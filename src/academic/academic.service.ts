@@ -1,10 +1,10 @@
 import { Injectable, NotFoundException } from '@nestjs/common';
-import { PrismaService } from '../database/prisma.service';
+import { DatabaseService } from '../database/database.service';
 import { CreateSemesterDto, CreateUEDto, CreateSubjectDto } from './dto/academic.dto';
 
 @Injectable()
 export class AcademicService {
-  constructor(private prisma: PrismaService) {}
+  constructor(private prisma: DatabaseService) {}
 
   // Semesters
   async createSemester(dto: CreateSemesterDto) {

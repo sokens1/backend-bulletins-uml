@@ -3,7 +3,7 @@ import { AuthService } from './auth.service';
 import { AuthController } from './auth.controller';
 import { JwtModule } from '@nestjs/jwt';
 import { PassportModule } from '@nestjs/passport';
-import { PrismaModule } from '../database/prisma.module';
+import { DatabaseModule } from '../database/database.module';
 import { JwtStrategy } from './strategy/jwt.strategy';
 
 @Module({
@@ -13,7 +13,7 @@ import { JwtStrategy } from './strategy/jwt.strategy';
       secret: process.env.JWT_SECRET || 'secret',
       signOptions: { expiresIn: '24h' },
     }),
-    PrismaModule,
+    DatabaseModule,
   ],
   providers: [AuthService, JwtStrategy],
   controllers: [AuthController],

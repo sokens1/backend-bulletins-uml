@@ -1,6 +1,6 @@
 import { Injectable, NotFoundException } from '@nestjs/common';
 import { GradesService } from '../grades/grades.service';
-import { PrismaService } from '../database/prisma.service';
+import { DatabaseService } from '../database/database.service';
 import { PDFDocument, rgb, StandardFonts } from 'pdf-lib';
 import * as ExcelJS from 'exceljs';
 
@@ -8,7 +8,7 @@ import * as ExcelJS from 'exceljs';
 export class ExportsService {
   constructor(
     private gradesService: GradesService,
-    private prisma: PrismaService,
+    private prisma: DatabaseService,
   ) {}
 
   async generateBulletinPdf(studentId: string, semesterId: string): Promise<Buffer> {
