@@ -96,12 +96,12 @@ export class ExportsService {
     const tableHeaderY = currentY;
     page.drawRectangle({ x: 30, y: tableHeaderY - 20, width: width - 60, height: 20, color: rgb(0.95, 0.95, 1), borderColor: rgb(0,0,0), borderWidth: 1 });
     
-    const cols = { matiere: 35, credits: 315, coeff: 375, studentNote: 435, classAvg: 515 };
+    const cols = { matiere: 35, credits: 315, coeff: 375, studentNote: 435, classAvg: 510 };
     page.drawText('Matière', { x: cols.matiere, y: tableHeaderY - 13, size: 9, font: fontBold });
     page.drawText('Crédits', { x: cols.credits, y: tableHeaderY - 13, size: 8, font: fontBold });
     page.drawText('Coefficients', { x: cols.coeff, y: tableHeaderY - 13, size: 8, font: fontBold });
     page.drawText("Notes de l'étudiant", { x: cols.studentNote - 5, y: tableHeaderY - 13, size: 8, font: fontBold, color: rgb(0, 0, 0.4) });
-    page.drawText('Moyenne de classe', { x: cols.classAvg - 5, y: tableHeaderY - 13, size: 8, font: fontBold });
+    page.drawText('Moyenne de classe', { x: cols.classAvg, y: tableHeaderY - 13, size: 8, font: fontBold });
 
     currentY = tableHeaderY - 20;
     for (const ue of report.report) {
@@ -139,7 +139,6 @@ export class ExportsService {
     
     page.drawText(`Moyenne au Semestre ${semester?.name.substring(1) || ''}`, { x: width - 30 - avgBoxWidth + 10, y: currentY - 17, size: 10, font: fontBold, color: rgb(0, 0, 0.4) });
     page.drawText(report.semesterAverage.toString(), { x: width - 85, y: currentY - 17, size: 11, font: fontBold });
-    page.drawText(globalStats.classAverage.toString(), { x: width - 30 - 35, y: currentY - 17, size: 9, font: fontNormal });
 
     // 7. Rank & Mention Grid
     currentY -= 40;
