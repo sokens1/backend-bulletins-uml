@@ -1,0 +1,107 @@
+// This is your Prisma schema file,
+// learn more about it in the docs: https://pris.ly/d/prisma-schema
+
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+enum Role {
+  ADMIN
+  TEACHER
+  SECRETARY
+  STUDENT
+}
+
+model User {
+  id        String   @id @default(uuid())
+  email     String   @unique
+  password  String
+  role      Role     @default(STUDENT)
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  student   Student?
+  teacher   Teacher?
+}
+
+model Student {
+  id          String   @id @default(uuid())
+  userId      String   @unique
+  studentId   String   @unique // Registration number (e.g. INPTIC-2024-XXX)
+  firstName   String
+  lastName    String
+  class       String   // e.g. "LP ASUR"
+  
+  user        User     @relation(fields: [userId], references: [id])
+  grades      Grade[]
+  attendances Attendance[]
+}
+
+model Teacher {
+  id        String    @id @default(uuid())
+  userId    String    @unique
+  firstName String
+  lastName  String
+
+  user      User      @relation(fields: [userId], references: [id])
+  subjects  Subject[] // Subjects taught by this teacher
+}
+
+model Semester {
+  id        String   @id @default(uuid())
+  name      String   // e.g. "S5", "S6"
+  year      String   // e.g. "2024-2025"
+  isActive  Boolean  @default(false)
+
+  ues       UE[]
+}
+
+model UE {
+  id         String   @id @default(uuid())
+  name       String   // e.g. "UE5-1 Outils de base"
+  credits    Int      // e.g. 9
+  semesterId String
+  
+  semester   Semester @relation(fields: [semesterId], references: [id])
+  subjects   Subject[]
+}
+
+model Subject {
+  id          String   @id @default(uuid())
+  name        String   // e.g. "Anglais"
+  coefficient Float    @default(1.0)
+  ueId        String
+  teacherId   String?
+
+  ue          UE       @relation(fields: [ueId], references: [id])
+  teacher     Teacher? @relation(fields: [teacherId], references: [id])
+  grades      Grade[]
+}
+
+model Grade {
+  id             String   @id @default(uuid())
+  ccGrade        Float?   // Controle Continu (40%)
+  examGrade      Float?   // Final Exam (60%)
+  rattrapageGrade Float?   // If applicable, replaces examGrade
+
+  studentId      String
+  subjectId      String
+
+  student        Student  @relation(fields: [studentId], references: [id])
+  subject        Subject  @relation(fields: [subjectId], references: [id])
+
+  @@unique([studentId, subjectId])
+}
+
+model Attendance {
+  id          String   @id @default(uuid())
+  hoursAbsent Int      @default(0)
+  studentId   String
+  
+  student     Student  @relation(fields: [studentId], references: [id])
+}
