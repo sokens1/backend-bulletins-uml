@@ -23,6 +23,12 @@ export class AuthService {
       throw new ConflictException('User already exists');
     }
 
+    if (dto.role === Role.STUDENT) {
+      if (!dto.studentId || !dto.class) {
+        throw new BadRequestException('studentId and class are required for STUDENTS');
+      }
+    }
+
     // 2. Hash password
     const hashedPassword = await bcrypt.hash(dto.password, 10);
 
@@ -36,9 +42,6 @@ export class AuthService {
     });
 
     if (user.role === Role.STUDENT) {
-      if (!dto.studentId || !dto.class) {
-        throw new BadRequestException('studentId and class are required for STUDENTS');
-      }
       await this.prisma.student.create({
         data: {
           userId: user.id,
