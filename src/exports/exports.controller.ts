@@ -33,6 +33,24 @@ export class ExportsController {
     res.end(buffer);
   }
 
+  @Get('bulletin-annual/:studentId')
+  @ApiOperation({ summary: 'Download student annual bulletin in PDF format' })
+  async downloadAnnualBulletin(
+    @Param('studentId') studentId: string,
+    @Query('year') year: string,
+    @Res() res: Response,
+  ) {
+    const buffer: Buffer = await this.exportsService.generateAnnualBulletinPdf(studentId, year);
+    
+    res.set({
+      'Content-Type': 'application/pdf',
+      'Content-Disposition': `attachment; filename=bulletin_annuel_${studentId}.pdf`,
+      'Content-Length': buffer.length,
+    });
+
+    res.end(buffer);
+  }
+
   @Post('import-grades')
   @Roles(Role.ADMIN, Role.SECRETARY)
   @UseInterceptors(FileInterceptor('file'))

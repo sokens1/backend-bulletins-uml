@@ -127,6 +127,7 @@ export class GradesService {
         return {
           subject: subject.name,
           average: parseFloat(average.toFixed(2)),
+          credits: subject.credits,
           absences,
           penalty: parseFloat(penalty.toFixed(2)),
           grade,
@@ -138,28 +139,97 @@ export class GradesService {
       totalSemesterCredits += ue.credits;
 
       return {
-        ue: ue.name,
+        ueName: ue.name,
+        ueCode: ue.code,
         average: parseFloat(ueAverage.toFixed(2)),
-        credits: ue.credits,
+        creditsExpected: ue.credits,
         subjects: subjectReports,
       };
     });
 
     const semesterAverage = totalSemesterCredits > 0 ? totalSemesterPoints / totalSemesterCredits : 0;
-    const finalReport = ueReports.map((ue) => ({
-      ...ue,
-      status: ue.average >= 10 || semesterAverage >= 10 ? 'VALIDATED' : 'NOT_VALIDATED',
-    }));
+    
+    // Detailed acquisition status
+    const finalReport = ueReports.map((ue) => {
+      let status = 'UE non Acquise';
+      let creditsWon = 0;
+
+      if (ue.average >= 10) {
+        status = 'UE Acquise';
+        creditsWon = ue.creditsExpected;
+      } else if (semesterAverage >= 10) {
+        status = 'UE Acquise par Compensation';
+        creditsWon = ue.creditsExpected;
+      }
+
+      return { ...ue, status, creditsWon };
+    });
+
+    const totalCreditsWon = finalReport.reduce((acc, curr) => acc + curr.creditsWon, 0);
+
+    // Rank calculation
+    const rankData = await this.getStudentRank(studentId, semesterId, parseFloat(semesterAverage.toFixed(2)));
 
     return {
-      studentId,
-      studentName: `${student.firstName} ${student.lastName}`,
+      student,
       semesterAverage: parseFloat(semesterAverage.toFixed(2)),
       absences: totalAbsences,
       penalty: parseFloat(totalPenalty.toFixed(2)),
       report: finalReport,
-      status: semesterAverage >= 10 ? 'ADMITTED' : 'FAILED',
+      totalCreditsWon,
+      rank: rankData.rank,
+      totalStudents: rankData.total,
+      status: semesterAverage >= 10 ? 'Semestre validé' : 'Semestre non validé',
     };
+  }
+
+  private async getStudentRank(studentId: string, semesterId: string, currentAvg: number) {
+    const students = await this.prisma.student.findMany();
+    const averages = await Promise.all(
+      students.map(async (s) => {
+        const report = await this.calculateStudentReportRaw(s.id, semesterId);
+        return { id: s.id, avg: report };
+      }),
+    );
+
+    const sorted = averages.sort((a, b) => b.avg - a.avg);
+    const rank = sorted.findIndex((s) => s.id === studentId) + 1;
+    
+    return { rank, total: students.length };
+  }
+
+  // Raw calculation to avoid recursion
+  private async calculateStudentReportRaw(studentId: string, semesterId: string) {
+    const ues = await this.prisma.uE.findMany({
+      where: { semesterId },
+      include: { subjects: { include: { grades: { where: { studentId } } } } },
+    });
+
+    let totalSemesterPoints = 0;
+    let totalSemesterCredits = 0;
+
+    for (const ue of ues) {
+      let totalUEPoints = 0;
+      let totalUECoeff = 0;
+
+      for (const subj of ue.subjects) {
+        const grade = subj.grades[0];
+        if (!grade) continue;
+
+        let avg = 0;
+        if (grade.rattrapageGrade !== null) avg = grade.rattrapageGrade;
+        else avg = (grade.ccGrade ?? 0) * 0.4 + (grade.examGrade ?? 0) * 0.6;
+        
+        totalUEPoints += avg * subj.coefficient;
+        totalUECoeff += subj.coefficient;
+      }
+
+      const ueAvg = totalUECoeff > 0 ? totalUEPoints / totalUECoeff : 0;
+      totalSemesterPoints += ueAvg * ue.credits;
+      totalSemesterCredits += ue.credits;
+    }
+
+    return totalSemesterCredits > 0 ? totalSemesterPoints / totalSemesterCredits : 0;
   }
 
   async getPromotionStats(semesterId: string) {
@@ -168,13 +238,34 @@ export class GradesService {
       students.map((s) => this.calculateStudentReport(s.id, semesterId)),
     );
 
-    const semesterAverages = allReports.map((r) => r.semesterAverage);
+    const averages = allReports.map((r) => r.semesterAverage);
     
+    // Calculate per-subject averages
+    const subjects = await this.prisma.subject.findMany({
+      where: { ue: { semesterId } },
+    });
+
+    const subjectStats = subjects.map((subj) => {
+      const subjectGrades = allReports
+        .flatMap((r) => r.report.flatMap((ue) => ue.subjects))
+        .filter((s) => s.subject === subj.name);
+      
+      const avg = subjectGrades.length > 0 
+        ? subjectGrades.reduce((acc, curr) => acc + curr.average, 0) / subjectGrades.length 
+        : 0;
+
+      return {
+        subjectName: subj.name,
+        average: parseFloat(avg.toFixed(2)),
+      };
+    });
+
     return {
-      classAverage: parseFloat((semesterAverages.reduce((a, b) => a + b, 0) / semesterAverages.length || 0).toFixed(2)),
-      min: semesterAverages.length > 0 ? Math.min(...semesterAverages) : 0,
-      max: semesterAverages.length > 0 ? Math.max(...semesterAverages) : 0,
+      classAverage: parseFloat((averages.reduce((a, b) => a + b, 0) / averages.length || 0).toFixed(2)),
+      min: averages.length > 0 ? Math.min(...averages) : 0,
+      max: averages.length > 0 ? Math.max(...averages) : 0,
       count: students.length,
+      subjectStats,
     };
   }
 
@@ -192,18 +283,17 @@ export class GradesService {
       ? validReports.reduce((acc, curr) => acc + curr.semesterAverage, 0) / validReports.length 
       : 0;
 
-    let mention = 'Sans mention';
+    let mention = 'Passable';
     if (annualAverage >= 16) mention = 'Très Bien';
     else if (annualAverage >= 14) mention = 'Bien';
     else if (annualAverage >= 12) mention = 'Assez Bien';
-    else if (annualAverage >= 10) mention = 'Passable';
 
     return {
-      studentName: `${student.firstName} ${student.lastName}`,
+      student,
       year,
       annualAverage: parseFloat(annualAverage.toFixed(2)),
       semesterReports: validReports,
-      status: annualAverage >= 10 ? 'ADMITTED' : 'FAILED',
+      status: annualAverage >= 10 ? 'Admis(e)' : 'Ajourné(e)',
       mention,
     };
   }
