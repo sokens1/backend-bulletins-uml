@@ -36,33 +36,40 @@ export class ExportsService {
       console.warn('Logo not found at src/assets/logo-inptic.png');
     }
 
-    // 1. Header Left (Institution)
-    const leftHeaderX = 40;
+    // 1. Institution Title and Logo (Centered)
     let currentY = height - 40;
-    page.drawText('INSTITUT NATIONAL DE LA POSTE, DES TECHNOLOGIES', { x: leftHeaderX, y: currentY, size: 8, font: fontBold });
+    const instTitle1 = 'INSTITUT NATIONAL DE LA POSTE, DES TECHNOLOGIES';
+    const instTitle2 = "DE L'INFORMATION ET DE LA COMMUNICATION";
+    
+    page.drawText(instTitle1, { x: width / 2 - fontBold.widthOfTextAtSize(instTitle1, 8) / 2, y: currentY, size: 8, font: fontBold });
     currentY -= 10;
-    page.drawText("DE L'INFORMATION ET DE LA COMMUNICATION", { x: leftHeaderX, y: currentY, size: 8, font: fontBold });
+    page.drawText(instTitle2, { x: width / 2 - fontBold.widthOfTextAtSize(instTitle2, 8) / 2, y: currentY, size: 8, font: fontBold });
     
     if (logoImage) {
-      page.drawImage(logoImage, { x: leftHeaderX + 40, y: currentY - 45, width: 60, height: 40 });
+      page.drawImage(logoImage, { x: width / 2 - 35, y: currentY - 50, width: 70, height: 45 });
     }
     
-    currentY -= 55;
-    page.drawText('DIRECTION DES ETUDES ET DE LA PEDAGOGIE', { x: leftHeaderX, y: currentY, size: 8, font: fontBold });
+    currentY -= 60;
+    const dirTitle = 'DIRECTION DES ETUDES ET DE LA PEDAGOGIE';
+    page.drawText(dirTitle, { x: width / 2 - fontBold.widthOfTextAtSize(dirTitle, 8) / 2, y: currentY, size: 8, font: fontBold });
 
-    // 2. Header Right (Republic)
+    // 2. Header Right (Republic - Gabonaise)
     const rightHeaderX = width - 150;
-    currentY = height - 40;
-    page.drawText('RÉPUBLIQUE GABONAISE', { x: rightHeaderX, y: currentY, size: 9, font: fontBold });
-    currentY -= 5;
-    page.drawText('- - - - - - - - - - -', { x: rightHeaderX + 15, y: currentY, size: 8, font: fontNormal });
-    currentY -= 10;
-    page.drawText('Union - Travail - Justice', { x: rightHeaderX + 10, y: currentY, size: 8, font: fontNormal });
-    currentY -= 5;
-    page.drawText('- - - - - - - - - - -', { x: rightHeaderX + 15, y: currentY, size: 8, font: fontNormal });
+    const republicY = height - 40;
+    page.drawText('RÉPUBLIQUE GABONAISE', { x: rightHeaderX, y: republicY, size: 9, font: fontBold });
+    page.drawText('- - - - - - - - - - -', { x: rightHeaderX + 15, y: republicY - 5, size: 8, font: fontNormal });
+    page.drawText('Union - Travail - Justice', { x: rightHeaderX + 10, y: republicY - 15, size: 8, font: fontNormal });
+    page.drawText('- - - - - - - - - - -', { x: rightHeaderX + 15, y: republicY - 20, size: 8, font: fontNormal });
 
-    // 3. Title
-    currentY -= 40;
+    // 3. Class Banner Box (Crucial)
+    currentY -= 45;
+    const classBoxHeight = 35;
+    const classText = `Classe : ${report.student!.class || 'Licence Professionnelle'}`;
+    page.drawRectangle({ x: 30, y: currentY - classBoxHeight, width: width - 60, height: classBoxHeight, borderColor: rgb(0, 0, 0.4), borderWidth: 1.5 });
+    page.drawText(classText.toUpperCase(), { x: width / 2 - fontBold.widthOfTextAtSize(classText.toUpperCase(), 11) / 2, y: currentY - 22, size: 11, font: fontBold, color: rgb(0, 0, 0.4) });
+
+    // 4. Title
+    currentY -= 65;
     const title = `Bulletin de notes du Semestre ${semester?.name.replace('S', '') || ''}`;
     const titleWidth = fontBold.widthOfTextAtSize(title, 16);
     page.drawText(title, { x: width / 2 - titleWidth / 2, y: currentY, size: 16, font: fontBold, color: rgb(0, 0, 0.5) });
@@ -84,94 +91,104 @@ export class ExportsService {
     const birthInfo = `Né[e] le ${report.student!.birthDate ? new Date(report.student!.birthDate).toLocaleDateString() : ''} à ${report.student!.birthPlace || ''}`;
     page.drawText(birthInfo, { x: 255, y: boxY - 33, size: 10, font: fontBold });
 
-    // 5. Main Table
+    // 5. Main Grades Table
     currentY -= 70;
     const tableHeaderY = currentY;
-    page.drawRectangle({ x: 40, y: tableHeaderY - 20, width: width - 80, height: 20, color: rgb(0.95, 0.95, 1), borderColor: rgb(0,0,0), borderWidth: 1 });
+    page.drawRectangle({ x: 30, y: tableHeaderY - 20, width: width - 60, height: 20, color: rgb(0.95, 0.95, 1), borderColor: rgb(0,0,0), borderWidth: 1 });
     
-    const cols = { matiere: 45, credits: 320, coeff: 380, studentNote: 450, classAvg: 520 };
+    const cols = { matiere: 35, credits: 315, coeff: 375, studentNote: 435, classAvg: 515 };
     page.drawText('Matière', { x: cols.matiere, y: tableHeaderY - 13, size: 9, font: fontBold });
     page.drawText('Crédits', { x: cols.credits, y: tableHeaderY - 13, size: 8, font: fontBold });
     page.drawText('Coefficients', { x: cols.coeff, y: tableHeaderY - 13, size: 8, font: fontBold });
-    page.drawText("Note l'étudiant", { x: cols.studentNote, y: tableHeaderY - 13, size: 8, font: fontBold });
-    page.drawText('Moyenne classe', { x: cols.classAvg, y: tableHeaderY - 13, size: 8, font: fontBold });
+    page.drawText("Notes de l'étudiant", { x: cols.studentNote - 5, y: tableHeaderY - 13, size: 8, font: fontBold, color: rgb(0, 0, 0.4) });
+    page.drawText('Moyenne de classe', { x: cols.classAvg - 5, y: tableHeaderY - 13, size: 8, font: fontBold });
 
     currentY = tableHeaderY - 20;
     for (const ue of report.report) {
-      // UE Header row
-      page.drawRectangle({ x: 40, y: currentY - 15, width: width - 80, height: 15, color: rgb(0.9, 0.9, 0.9), borderColor: rgb(0,0,0), borderWidth: 0.5 });
-      page.drawText(`${ue.ueCode || ''} : ${ue.ueName}`, { x: 45, y: currentY - 11, size: 8, font: fontBold });
-      currentY -= 15;
+      // UE Header row (UE 6-1 style)
+      page.drawRectangle({ x: 30, y: currentY - 18, width: width - 60, height: 18, color: rgb(0.97, 0.97, 0.97), borderColor: rgb(0,0,0), borderWidth: 0.5 });
+      page.drawText(`UE ${semester?.name.substring(1) || '0'}-${report.report.indexOf(ue) + 1} : ${ue.ueName}`, { x: 35, y: currentY - 13, size: 9, font: fontBold, color: rgb(0, 0, 0.4) });
+      currentY -= 18;
 
       for (const subj of ue.subjects) {
-        page.drawRectangle({ x: 40, y: currentY - 15, width: width - 80, height: 15, borderColor: rgb(0,0,0), borderWidth: 0.5 });
-        page.drawText(subj.subject.substring(0, 50), { x: 50, y: currentY - 11, size: 8, font: fontNormal });
-        page.drawText(subj.credits?.toString() || '-', { x: cols.credits + 15, y: currentY - 11, size: 8, font: fontNormal });
-        page.drawText('2,00', { x: cols.coeff + 15, y: currentY - 11, size: 8, font: fontNormal }); // Static coeff for now or from DB
-        page.drawText(subj.average.toString(), { x: cols.studentNote + 20, y: currentY - 11, size: 8, font: fontBold });
+        page.drawRectangle({ x: 30, y: currentY - 18, width: width - 60, height: 18, borderColor: rgb(0,0,0), borderWidth: 0.5 });
+        page.drawText(subj.subject.substring(0, 55), { x: 45, y: currentY - 12, size: 8.5, font: fontNormal });
+        page.drawText(subj.credits?.toString() || '-', { x: cols.credits + 15, y: currentY - 12, size: 8, font: fontNormal });
+        page.drawText('3,00', { x: cols.coeff + 15, y: currentY - 12, size: 8, font: fontNormal }); 
+        page.drawText(subj.average.toString(), { x: cols.studentNote + 20, y: currentY - 12, size: 9, font: fontBold });
         
         const subjStat = globalStats.subjectStats.find(s => s.subjectName === subj.subject);
-        page.drawText(subjStat?.average.toString() || '-', { x: cols.classAvg + 20, y: currentY - 11, size: 8, font: fontNormal });
-        currentY -= 15;
+        page.drawText(subjStat?.average.toString() || '-', { x: cols.classAvg + 20, y: currentY - 12, size: 8, font: fontNormal });
+        currentY -= 18;
       }
 
-      // UE Footer (Moyenne UE)
-      page.drawRectangle({ x: 40, y: currentY - 15, width: width - 80, height: 15, borderColor: rgb(0,0,0), borderWidth: 0.5 });
-      page.drawText(`Moyenne ${ue.ueCode || 'UE'}`, { x: 180, y: currentY - 11, size: 8, font: fontBold });
-      page.drawText(ue.creditsExpected.toString(), { x: cols.credits + 15, y: currentY - 11, size: 8, font: fontBold });
-      page.drawText(ue.average.toString(), { x: cols.studentNote + 20, y: currentY - 11, size: 8, font: fontBold });
-      currentY -= 15;
+      // UE Footer
+      page.drawRectangle({ x: 30, y: currentY - 18, width: width - 60, height: 18, color: rgb(0.98, 0.98, 0.98), borderColor: rgb(0,0,0), borderWidth: 0.5 });
+      page.drawText(`Moyenne UE ${semester?.name.substring(1) || '0'}-${report.report.indexOf(ue) + 1}`, { x: 150, y: currentY - 13, size: 9, font: fontBold, color: rgb(0, 0, 0.4) });
+      page.drawText(ue.creditsExpected.toString(), { x: cols.credits + 15, y: currentY - 13, size: 8, font: fontBold });
+      page.drawText(ue.average.toString(), { x: cols.studentNote + 20, y: currentY - 13, size: 9, font: fontBold, color: rgb(0, 0, 0.4) });
+      currentY -= 18;
     }
 
-    // 6. Penalty Row
-    currentY -= 5;
-    page.drawRectangle({ x: 40, y: currentY - 15, width: width - 80, height: 15, borderColor: rgb(0,0,0), borderWidth: 0.5 });
-    page.drawText("Pénalités d'absences", { x: 80, y: currentY - 11, size: 8, font: fontBold });
-    page.drawText('0,01/heure', { x: cols.coeff + 10, y: currentY - 11, size: 8, font: fontBold, color: rgb(0.8, 0.4, 0) });
-    page.drawText(`${report.absences} heure(s)`, { x: cols.studentNote + 10, y: currentY - 11, size: 8, font: fontBold, color: rgb(0, 0.2, 0.6) });
-    currentY -= 15;
+    // 6. Annual / Semester Average (Yellow Highlight)
+    currentY -= 20;
+    const avgBoxWidth = 250;
+    page.drawRectangle({ x: width - 30 - avgBoxWidth, y: currentY - 25, width: avgBoxWidth, height: 25, borderColor: rgb(0,0,0), borderWidth: 1.5 });
+    page.drawRectangle({ x: width - 110, y: currentY - 25, width: 80, height: 25, color: rgb(1, 0.9, 0.5) }); // Yellow
+    page.drawLine({ start: { x: width - 110, y: currentY }, end: { x: width - 110, y: currentY - 25 }, thickness: 1 });
+    
+    page.drawText(`Moyenne au Semestre ${semester?.name.substring(1) || ''}`, { x: width - 30 - avgBoxWidth + 10, y: currentY - 17, size: 10, font: fontBold, color: rgb(0, 0, 0.4) });
+    page.drawText(report.semesterAverage.toString(), { x: width - 85, y: currentY - 17, size: 11, font: fontBold });
+    page.drawText(globalStats.classAverage.toString(), { x: width - 30 - 35, y: currentY - 17, size: 9, font: fontNormal });
 
-    // 7. Results Summary
-    currentY -= 10;
-    page.drawRectangle({ x: 280, y: currentY - 20, width: width - 320, height: 20, borderColor: rgb(0,0,0), borderWidth: 2 });
-    page.drawText(`Moyenne Semestre ${semester?.name.replace('S', '') || ''}`, { x: 300, y: currentY - 14, size: 10, font: fontBold });
-    page.drawText(report.semesterAverage.toString(), { x: cols.studentNote + 15, y: currentY - 14, size: 11, font: fontBold });
-    page.drawText(globalStats.classAverage.toString(), { x: cols.classAvg + 15, y: currentY - 14, size: 10, font: fontNormal });
-
-    // 8. Rank & Mention Box
-    currentY -= 35;
+    // 7. Rank & Mention Grid
+    currentY -= 40;
     const rankText = report.rank === 1 ? '1er' : `${report.rank}ème`;
-    page.drawRectangle({ x: 130, y: currentY - 30, width: 330, height: 30, borderColor: rgb(0,0,0), borderWidth: 1 });
-    page.drawLine({ start: { x: 300, y: currentY }, end: { x: 300, y: currentY - 30 }, thickness: 1 });
-    page.drawText('Rang de l\'étudiant au Semestre', { x: 135, y: currentY - 13, size: 9, font: fontNormal });
-    page.drawText(`${rankText} / ${report.totalStudents}`, { x: 135, y: currentY - 25, size: 9, font: fontBold });
-    page.drawText('Mention', { x: 305, y: currentY - 13, size: 9, font: fontNormal });
+    page.drawRectangle({ x: 150, y: currentY - 35, width: 300, height: 35, borderColor: rgb(0,0,0), borderWidth: 1 });
+    page.drawLine({ start: { x: 300, y: currentY }, end: { x: 300, y: currentY - 35 }, thickness: 1 });
+    page.drawText("Rang de l'étudiant au Semestre", { x: 155, y: currentY - 15, size: 9, font: fontNormal });
+    page.drawText(`${rankText} / ${report.totalStudents}`, { x: 155, y: currentY - 28, size: 10, font: fontBold });
+    page.drawText('Mention', { x: 305, y: currentY - 15, size: 9, font: fontNormal });
     
     let mention = 'Passable';
     if (report.semesterAverage >= 16) mention = 'Très Bien';
     else if (report.semesterAverage >= 14) mention = 'Bien';
     else if (report.semesterAverage >= 12) mention = 'Assez Bien';
-    page.drawText(mention, { x: 305, y: currentY - 25, size: 9, font: fontBold });
+    page.drawText(mention, { x: 305, y: currentY - 28, size: 10, font: fontBold });
 
-    // 9. Validation Grid
-    currentY -= 50;
-    page.drawText('Etat de la Validation des Crédits au Semestre', { x: width / 2 - 100, y: currentY, size: 9, font: fontBold });
-    currentY -= 15;
-    const gridWidth = width - 100;
-    page.drawRectangle({ x: 50, y: currentY - 30, width: gridWidth, height: 30, borderColor: rgb(0,0,0), borderWidth: 1 });
-    page.drawLine({ start: { x: 250, y: currentY }, end: { x: 250, y: currentY - 30 }, thickness: 1 });
-    page.drawLine({ start: { x: 390, y: currentY }, end: { x: 390, y: currentY - 30 }, thickness: 1 });
-    
-    page.drawText('Total Crédits', { x: 60, y: currentY - 12, size: 8, font: fontNormal });
-    page.drawText(`${report.totalCreditsWon} / 30`, { x: 130, y: currentY - 12, size: 8, font: fontBold });
-    page.drawText('Décision du Jury', { x: 260, y: currentY - 12, size: 8, font: fontNormal });
-    page.drawText(report.status.toUpperCase(), { x: 395, y: currentY - 12, size: 9, font: fontBold, color: report.semesterAverage >= 10 ? rgb(0, 0.5, 0) : rgb(0.8, 0, 0) });
-
-    // 10. Footer
+    // 8. Validation Credits Table (Multi-column)
     currentY -= 60;
-    page.drawText(`Fait à Libreville, le ${new Date().toLocaleDateString('fr-FR')}`, { x: 250, y: currentY, size: 10, font: fontBold });
+    const validationTitle = `Etat de la Validation des Crédits au Semestre ${semester?.name.substring(1) || ''}`;
+    page.drawText(validationTitle, { x: width / 2 - fontBold.widthOfTextAtSize(validationTitle, 9) / 2, y: currentY, size: 9, font: fontBold });
+    currentY -= 15;
+    
+    const valColWidth = (width - 60) / 3;
+    page.drawRectangle({ x: 30, y: currentY - 45, width: width - 60, height: 45, borderColor: rgb(0,0,0), borderWidth: 1 });
+    page.drawLine({ start: { x: 30 + valColWidth, y: currentY }, end: { x: 30 + valColWidth, y: currentY - 45 }, thickness: 1 });
+    page.drawLine({ start: { x: 30 + valColWidth * 2, y: currentY }, end: { x: 30 + valColWidth * 2, y: currentY - 45 }, thickness: 1 });
+
+    // Fill headers logic for UEs
+    report.report.slice(0, 2).forEach((ue, idx) => {
+      const startX = 30 + (valColWidth * idx);
+      page.drawText(`UE ${semester?.name.substring(1) || '0'}-${idx + 1}`, { x: startX + 5, y: currentY - 12, size: 8, font: fontBold });
+      page.drawText(`${ue.creditsWon} Crédits / ${ue.creditsExpected}`, { x: startX + 5, y: currentY - 25, size: 8, font: fontNormal });
+      page.drawText(ue.status, { x: startX + 5, y: currentY - 38, size: 8, font: fontItalic });
+    });
+
+    const totalColumnX = 30 + valColWidth * 2;
+    page.drawText('Crédits Acquis au Semestre', { x: totalColumnX + 5, y: currentY - 12, size: 8, font: fontBold });
+    page.drawText(`${report.totalCreditsWon} Crédits / 30`, { x: totalColumnX + 5, y: currentY - 25, size: 8, font: fontNormal });
+    page.drawText(report.status.toUpperCase(), { x: totalColumnX + 5, y: currentY - 38, size: 8, font: fontBold, color: report.semesterAverage >= 10 ? rgb(0, 0.4, 0) : rgb(0.7, 0, 0) });
+
+    // 9. Final Footer Blocks
+    currentY -= 80;
+    page.drawText(`Décision du Jury :    ${report.semesterAverage.toFixed(2)}`, { x: 60, y: currentY, size: 10, font: fontBold, color: rgb(0, 0, 0.4) });
+    page.drawLine({ start: { x: 160, y: currentY - 2 }, end: { x: 535, y: currentY - 2 }, thickness: 0.5, color: rgb(0, 0, 0.4) });
+
+    currentY -= 40;
+    page.drawText(`Fait à Libreville, le ${new Date().toLocaleDateString('fr-FR')}`, { x: width / 2 - 50, y: currentY, size: 10, font: fontBold });
     currentY -= 20;
-    page.drawText('Le Directeur des Etudes et de la Pédagogie', { x: 230, y: currentY, size: 10, font: fontBold });
+    page.drawText('LE DIRECTEUR DES ETUDES ET DE LA PEDAGOGIE', { x: width / 2 - 120, y: currentY, size: 11, font: fontBold, color: rgb(0, 0, 0.4) });
 
     const pdfBytes = await pdfDoc.save();
     return Buffer.from(pdfBytes);
