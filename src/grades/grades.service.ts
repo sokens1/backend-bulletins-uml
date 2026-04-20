@@ -190,6 +190,8 @@ export class GradesService {
       include: { user: true }
     });
 
+    if (!studentWithUser) throw new NotFoundException('Student profile not found');
+
     return {
       student: studentWithUser,
       semesterAverage: parseFloat(semesterAverage.toFixed(2)),

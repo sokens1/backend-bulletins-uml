@@ -79,9 +79,9 @@ export class ExportsService {
     page.drawLine({ start: { x: 250, y: boxY + 5 }, end: { x: 250, y: boxY - 40 }, thickness: 1 });
 
     page.drawText('Nom(s) et Prénom(s)', { x: 45, y: boxY - 10, size: 10, font: fontNormal });
-    page.drawText(`${report.student.firstName} ${report.student.lastName}`.toUpperCase(), { x: 255, y: boxY - 10, size: 11, font: fontBold });
+    page.drawText(`${report.student!.firstName} ${report.student!.lastName}`.toUpperCase(), { x: 255, y: boxY - 10, size: 11, font: fontBold });
     page.drawText('Date et lieu de naissance', { x: 45, y: boxY - 33, size: 10, font: fontNormal });
-    const birthInfo = `Né[e] le ${report.student.birthDate ? new Date(report.student.birthDate).toLocaleDateString() : ''} à ${report.student.birthPlace || ''}`;
+    const birthInfo = `Né[e] le ${report.student!.birthDate ? new Date(report.student!.birthDate).toLocaleDateString() : ''} à ${report.student!.birthPlace || ''}`;
     page.drawText(birthInfo, { x: 255, y: boxY - 33, size: 10, font: fontBold });
 
     // 5. Main Table
