@@ -36,6 +36,10 @@ model Student {
   firstName   String
   lastName    String
   class       String   // e.g. "LP ASUR"
+  birthDate   DateTime?
+  birthPlace  String?
+  bacType     String?
+  provenance  String?  // Etablissement d'origine
   
   user        User     @relation(fields: [userId], references: [id])
   grades      Grade[]
@@ -63,7 +67,8 @@ model Semester {
 
 model UE {
   id         String   @id @default(uuid())
-  name       String   // e.g. "UE5-1 Outils de base"
+  code       String?  // e.g. "UE5-1"
+  name       String   // e.g. "Outils de base"
   credits    Int      // e.g. 9
   semesterId String
   
@@ -75,6 +80,7 @@ model Subject {
   id          String   @id @default(uuid())
   name        String   // e.g. "Anglais"
   coefficient Float    @default(1.0)
+  credits     Int      @default(2) // Subject credits
   ueId        String
   teacherId   String?
 

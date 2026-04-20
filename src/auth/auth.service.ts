@@ -46,6 +46,10 @@ export class AuthService {
           firstName: dto.firstName,
           lastName: dto.lastName,
           class: dto.class,
+          birthDate: dto.birthDate ? new Date(dto.birthDate) : undefined,
+          birthPlace: dto.birthPlace,
+          bacType: dto.bacType,
+          provenance: dto.provenance,
         },
       });
     } else if (user.role === Role.TEACHER) {

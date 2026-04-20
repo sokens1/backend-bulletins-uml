@@ -36,5 +36,24 @@ export class RegisterDto {
   @ApiProperty({ example: 'LP ASUR', required: false })
   @IsString()
   @IsOptional()
-  class?: string; // Required if role is STUDENT
+  class?: string;
+
+  @ApiProperty({ example: '2000-01-01', required: false })
+  @IsOptional()
+  birthDate?: Date;
+
+  @ApiProperty({ example: 'Libreville', required: false })
+  @IsString()
+  @IsOptional()
+  birthPlace?: string;
+
+  @ApiProperty({ example: 'S', required: false })
+  @IsString()
+  @IsOptional()
+  bacType?: string;
+
+  @ApiProperty({ example: 'Lycée National', required: false })
+  @IsString()
+  @IsOptional()
+  provenance?: string;
 }
