@@ -1,7 +1,12 @@
 import { PrismaClient, Role } from '@prisma/client';
 import * as bcrypt from 'bcrypt';
+import { PrismaPg } from '@prisma/adapter-pg';
+import { Pool } from 'pg';
 
-const prisma = new PrismaClient();
+// For Prisma 7, we must use the driver adapter even in the seed script
+const pool = new Pool({ connectionString: process.env.DATABASE_URL });
+const adapter = new PrismaPg(pool);
+const prisma = new PrismaClient({ adapter });
 
 async function main() {
   const adminEmail = 'admin@inptic.ga';
@@ -29,8 +34,8 @@ async function main() {
   }
 
   // Create two Semesters by default if they don't exist
-  const s5 = await prisma.semester.upsert({
-    where: { id: 's5-uuid-placeholder' }, // Simple fixed IDs for seeding
+  await prisma.semester.upsert({
+    where: { id: 's5-uuid-placeholder' },
     update: {},
     create: {
       id: 's5-uuid-placeholder',
@@ -40,7 +45,7 @@ async function main() {
     },
   });
 
-  const s6 = await prisma.semester.upsert({
+  await prisma.semester.upsert({
     where: { id: 's6-uuid-placeholder' },
     update: {},
     create: {
@@ -61,4 +66,5 @@ main()
   })
   .finally(async () => {
     await prisma.$disconnect();
+    await pool.end();
   });
