@@ -1,4 +1,4 @@
-import { Controller, Get, Post, Param, Query, Res, UseInterceptors, UploadedFile, UseGuards } from '@nestjs/common';
+import { Controller, Get, Post, Param, Query, Res, UseInterceptors, UploadedFile, UseGuards, Request } from '@nestjs/common';
 import { ExportsService } from './exports.service';
 import type { Response } from 'express';
 import { FileInterceptor } from '@nestjs/platform-express';
@@ -50,7 +50,8 @@ export class ExportsController {
   async importGrades(
     @UploadedFile() file: Express.Multer.File,
     @Query('semesterId') semesterId: string,
+    @Request() req,
   ) {
-    return this.exportsService.importGradesFromExcel(file.buffer, semesterId);
+    return this.exportsService.importGradesFromExcel(file.buffer, semesterId, req.user.id);
   }
 }

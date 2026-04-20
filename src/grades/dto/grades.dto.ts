@@ -40,6 +40,11 @@ export class EnterAttendanceDto {
   @IsNotEmpty()
   studentId: string;
 
+  @ApiProperty({ description: 'ID of the subject' })
+  @IsString()
+  @IsNotEmpty()
+  subjectId: string;
+
   @ApiProperty({ example: 2, description: 'Number of hours absent' })
   @IsNumber()
   @Min(0)

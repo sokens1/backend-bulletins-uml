@@ -1,4 +1,4 @@
-import { Controller, Post, Get, Body, Param, UseGuards, Query } from '@nestjs/common';
+import { Controller, Post, Get, Body, Param, UseGuards, Query, Request } from '@nestjs/common';
 import { GradesService } from './grades.service';
 import { EnterGradeDto, EnterAttendanceDto } from './dto/grades.dto';
 import { ApiTags, ApiOperation, ApiBearerAuth } from '@nestjs/swagger';
@@ -17,15 +17,15 @@ export class GradesController {
   @Post('enter')
   @Roles(Role.ADMIN, Role.TEACHER, Role.SECRETARY)
   @ApiOperation({ summary: 'Enter or update a grade (Teacher, Secretary, Admin)' })
-  enterGrade(@Body() dto: EnterGradeDto) {
-    return this.gradesService.enterGrade(dto);
+  enterGrade(@Body() dto: EnterGradeDto, @Request() req) {
+    return this.gradesService.enterGrade(dto, req.user.id);
   }
 
   @Post('attendance')
   @Roles(Role.ADMIN, Role.SECRETARY)
   @ApiOperation({ summary: 'Register student attendance/absence (Secretary, Admin only)' })
-  enterAttendance(@Body() dto: EnterAttendanceDto) {
-    return this.gradesService.enterAttendance(dto);
+  enterAttendance(@Body() dto: EnterAttendanceDto, @Request() req) {
+    return this.gradesService.enterAttendance(dto, req.user.id);
   }
 
   @Get('report/:studentId')
@@ -35,5 +35,21 @@ export class GradesController {
     @Query('semesterId') semesterId: string,
   ) {
     return this.gradesService.calculateStudentReport(studentId, semesterId);
+  }
+
+  @Get('report-annual/:studentId')
+  @ApiOperation({ summary: 'Generate an annual report (S5 + S6)' })
+  getAnnualReport(
+    @Param('studentId') studentId: string,
+    @Query('year') year: string,
+  ) {
+    return this.gradesService.calculateAnnualReport(studentId, year);
+  }
+
+  @Get('audit')
+  @Roles(Role.ADMIN)
+  @ApiOperation({ summary: 'Consult audit logs (Admin only)' })
+  getAuditLogs() {
+    return this.gradesService.getAuditLogs();
   }
 }

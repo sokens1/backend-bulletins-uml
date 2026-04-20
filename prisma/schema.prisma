@@ -2,8 +2,7 @@
 // learn more about it in the docs: https://pris.ly/d/prisma-schema
 
 generator client {
-  provider        = "prisma-client-js"
-  previewFeatures = ["driverAdapters"]
+  provider = "prisma-client-js"
 }
 
 datasource db {
@@ -27,6 +26,7 @@ model User {
 
   student   Student?
   teacher   Teacher?
+  auditLogs AuditLog[]
 }
 
 model Student {
@@ -81,6 +81,7 @@ model Subject {
   ue          UE       @relation(fields: [ueId], references: [id])
   teacher     Teacher? @relation(fields: [teacherId], references: [id])
   grades      Grade[]
+  attendances Attendance[]
 }
 
 model Grade {
@@ -102,6 +103,21 @@ model Attendance {
   id          String   @id @default(uuid())
   hoursAbsent Int      @default(0)
   studentId   String
+  subjectId   String
   
   student     Student  @relation(fields: [studentId], references: [id])
+  subject     Subject  @relation(fields: [subjectId], references: [id])
+}
+
+model AuditLog {
+  id        String   @id @default(uuid())
+  userId    String
+  action    String   // e.g. "UPDATE_GRADE", "ENTER_ATTENDANCE"
+  entity    String   // e.g. "Grade", "Attendance"
+  entityId  String
+  oldData   Json?
+  newData   Json?
+  timestamp DateTime @default(now())
+
+  user      User     @relation(fields: [userId], references: [id])
 }
