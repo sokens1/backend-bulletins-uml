@@ -96,37 +96,59 @@ export class ExportsService {
     const tableHeaderY = currentY;
     page.drawRectangle({ x: 30, y: tableHeaderY - 20, width: width - 60, height: 20, color: rgb(0.95, 0.95, 1), borderColor: rgb(0,0,0), borderWidth: 1 });
     
-    const cols = { matiere: 35, credits: 315, coeff: 375, studentNote: 435, classAvg: 495 };
+    const cols = { matiere: 35, credits: 310, coeff: 365, studentNote: 425, classAvg: 505 };
     page.drawText('Matière', { x: cols.matiere, y: tableHeaderY - 13, size: 9, font: fontBold });
     page.drawText('Crédits', { x: cols.credits, y: tableHeaderY - 13, size: 8, font: fontBold });
-    page.drawText('Coefficients', { x: cols.coeff, y: tableHeaderY - 13, size: 8, font: fontBold });
+    page.drawText('Coefficients', { x: cols.coeff, y: tableHeaderY - 13, size: 7, font: fontBold });
     page.drawText("Notes de l'étudiant", { x: cols.studentNote - 5, y: tableHeaderY - 13, size: 8, font: fontBold, color: rgb(0, 0, 0.4) });
-    page.drawText('Moy. de classe', { x: cols.classAvg, y: tableHeaderY - 13, size: 7.5, font: fontBold });
+    page.drawText('Moy. classe', { x: cols.classAvg, y: tableHeaderY - 13, size: 8, font: fontBold });
+
+    // Vertical lines for header
+    [cols.credits - 5, cols.coeff - 5, cols.studentNote - 10, cols.classAvg - 5].forEach(x => {
+      page.drawLine({ start: { x, y: tableHeaderY }, end: { x, y: tableHeaderY - 20 }, thickness: 1 });
+    });
 
     currentY = tableHeaderY - 20;
+    const tableStartY = currentY;
+
     for (const ue of report.report) {
-      // UE Header row (UE 6-1 style)
+      // UE Header row (UE 5-1 style)
       page.drawRectangle({ x: 30, y: currentY - 18, width: width - 60, height: 18, color: rgb(0.97, 0.97, 0.97), borderColor: rgb(0,0,0), borderWidth: 0.5 });
       page.drawText(`UE ${semester?.name.substring(1) || '0'}-${report.report.indexOf(ue) + 1} : ${ue.ueName}`, { x: 35, y: currentY - 13, size: 9, font: fontBold, color: rgb(0, 0, 0.4) });
+      
+      // Vertical lines for UE row
+      [cols.credits - 5, cols.coeff - 5, cols.studentNote - 10, cols.classAvg - 5].forEach(x => {
+        page.drawLine({ start: { x, y: currentY }, end: { x, y: currentY - 18 }, thickness: 0.5 });
+      });
       currentY -= 18;
 
       for (const subj of ue.subjects) {
         page.drawRectangle({ x: 30, y: currentY - 18, width: width - 60, height: 18, borderColor: rgb(0,0,0), borderWidth: 0.5 });
-        page.drawText(subj.subject.substring(0, 55), { x: 45, y: currentY - 12, size: 8.5, font: fontNormal });
-        page.drawText(subj.credits?.toString() || '-', { x: cols.credits + 15, y: currentY - 12, size: 8, font: fontNormal });
-        page.drawText('3,00', { x: cols.coeff + 15, y: currentY - 12, size: 8, font: fontNormal }); 
-        page.drawText(subj.average.toString(), { x: cols.studentNote + 20, y: currentY - 12, size: 9, font: fontBold });
+        page.drawText(subj.subject.substring(0, 52), { x: 45, y: currentY - 12, size: 8, font: fontNormal });
+        page.drawText(subj.credits?.toString() || '-', { x: cols.credits + 10, y: currentY - 12, size: 8, font: fontNormal });
+        page.drawText('3,00', { x: cols.coeff + 10, y: currentY - 12, size: 8, font: fontNormal }); 
+        page.drawText(subj.average.toString(), { x: cols.studentNote + 15, y: currentY - 12, size: 9, font: fontBold });
         
         const subjStat = globalStats.subjectStats.find(s => s.subjectName === subj.subject);
-        page.drawText(subjStat?.average.toString() || '-', { x: cols.classAvg + 20, y: currentY - 12, size: 8, font: fontNormal });
+        page.drawText(subjStat?.average.toString() || '-', { x: cols.classAvg + 15, y: currentY - 12, size: 8, font: fontNormal });
+        
+        // Vertical lines for subject row
+        [cols.credits - 5, cols.coeff - 5, cols.studentNote - 10, cols.classAvg - 5].forEach(x => {
+          page.drawLine({ start: { x, y: currentY }, end: { x, y: currentY - 18 }, thickness: 0.5 });
+        });
         currentY -= 18;
       }
 
       // UE Footer
       page.drawRectangle({ x: 30, y: currentY - 18, width: width - 60, height: 18, color: rgb(0.98, 0.98, 0.98), borderColor: rgb(0,0,0), borderWidth: 0.5 });
-      page.drawText(`Moyenne UE ${semester?.name.substring(1) || '0'}-${report.report.indexOf(ue) + 1}`, { x: 150, y: currentY - 13, size: 9, font: fontBold, color: rgb(0, 0, 0.4) });
-      page.drawText(ue.creditsExpected.toString(), { x: cols.credits + 15, y: currentY - 13, size: 8, font: fontBold });
-      page.drawText(ue.average.toString(), { x: cols.studentNote + 20, y: currentY - 13, size: 9, font: fontBold, color: rgb(0, 0, 0.4) });
+      page.drawText(`Moyenne UE ${semester?.name.substring(1) || '0'}-${report.report.indexOf(ue) + 1}`, { x: 130, y: currentY - 13, size: 9, font: fontBold, color: rgb(0, 0, 0.4) });
+      page.drawText(ue.creditsExpected.toString(), { x: cols.credits + 10, y: currentY - 13, size: 8, font: fontBold });
+      page.drawText(ue.average.toString(), { x: cols.studentNote + 15, y: currentY - 13, size: 9, font: fontBold, color: rgb(0, 0, 0.4) });
+      
+      // Vertical lines for footer row
+      [cols.credits - 5, cols.coeff - 5, cols.studentNote - 10, cols.classAvg - 5].forEach(x => {
+        page.drawLine({ start: { x, y: currentY }, end: { x, y: currentY - 18 }, thickness: 0.5 });
+      });
       currentY -= 18;
     }
 
