@@ -45,14 +45,14 @@ export class AuthService {
       await this.prisma.student.create({
         data: {
           userId: user.id,
-          studentId: dto.studentId,
+          studentId: dto.studentId!,
           firstName: dto.firstName,
           lastName: dto.lastName,
-          class: dto.class,
-          birthDate: dto.birthDate ? new Date(dto.birthDate) : undefined,
-          birthPlace: dto.birthPlace,
-          bacType: dto.bacType,
-          provenance: dto.provenance,
+          class: dto.class!,
+          birthDate: dto.birthDate ? new Date(dto.birthDate) : null,
+          birthPlace: dto.birthPlace ?? null,
+          bacType: dto.bacType ?? null,
+          provenance: dto.provenance ?? null,
         },
       });
     } else if (user.role === Role.TEACHER) {
