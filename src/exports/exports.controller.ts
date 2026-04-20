@@ -1,6 +1,6 @@
 import { Controller, Get, Post, Param, Query, Res, UseInterceptors, UploadedFile, UseGuards } from '@nestjs/common';
 import { ExportsService } from './exports.service';
-import { Response } from 'express';
+import type { Response } from 'express';
 import { FileInterceptor } from '@nestjs/platform-express';
 import { ApiTags, ApiOperation, ApiBearerAuth, ApiConsumes, ApiBody } from '@nestjs/swagger';
 import { JwtAuthGuard } from '../auth/guard/jwt-auth.guard';
@@ -22,7 +22,7 @@ export class ExportsController {
     @Query('semesterId') semesterId: string,
     @Res() res: Response,
   ) {
-    const buffer = await this.exportsService.generateBulletinPdf(studentId, semesterId);
+    const buffer: Buffer = await this.exportsService.generateBulletinPdf(studentId, semesterId);
     
     res.set({
       'Content-Type': 'application/pdf',

@@ -70,12 +70,12 @@ export class ExportsService {
 
   async importGradesFromExcel(buffer: Buffer, semesterId: string) {
     const workbook = new ExcelJS.Workbook();
-    await workbook.xlsx.load(buffer);
+    await workbook.xlsx.load(buffer as any);
     const worksheet = workbook.getWorksheet(1);
     
     if (!worksheet) throw new NotFoundException('Worksheet not found');
 
-    const results = [];
+    const results: { studentId: string; subjectId: string; ccGrade: number; examGrade: number }[] = [];
     worksheet.eachRow((row, rowNumber) => {
       if (rowNumber === 1) return; // Skip header
 
