@@ -1,0 +1,18 @@
+services:
+  - type: web
+    name: grade-management-api
+    runtime: node
+    plan: free # Change to professional plan if needed
+    buildCommand: npm install && npm run build
+    startCommand: npm run start:prod
+    envVars:
+      - key: NODE_ENV
+        value: production
+      - key: DATABASE_URL
+        fromDatabase:
+          name: bulletins-db
+          property: connectionString
+
+databases:
+  - name: bulletins-db
+    plan: free # Render free tier is limited, upgrade for production
