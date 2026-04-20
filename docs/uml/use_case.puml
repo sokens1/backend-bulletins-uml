@@ -1,0 +1,37 @@
+@startuml
+left to right direction
+actor "Administrateur" as Admin
+actor "Secrétaire" as Secretary
+actor "Enseignant" as Teacher
+actor "Étudiant" as Student
+
+package "Gestion des Bulletins (API)" {
+  usecase "Authentification (JWT)" as UC_Auth
+  usecase "Gérer Structure Académique (UE/Matières)" as UC_Struct
+  usecase "Saisir Notes (CC/Exam)" as UC_Grades
+  usecase "Saisir Absences" as UC_Attendance
+  usecase "Visualiser Bulletin" as UC_View
+  usecase "Générer Bulletin PDF" as UC_Pdf
+  usecase "Importer Notes via Excel" as UC_Excel
+}
+
+Admin -- UC_Auth
+Admin -- UC_Struct
+Admin -- UC_Grades
+Admin -- UC_Pdf
+
+Secretary -- UC_Auth
+Secretary -- UC_Grades
+Secretary -- UC_Attendance
+Secretary -- UC_Pdf
+Secretary -- UC_Excel
+
+Teacher -- UC_Auth
+Teacher -- UC_Grades
+
+Student -- UC_Auth
+Student -- UC_View
+
+UC_Grades ..> UC_Auth : <<include>>
+UC_Pdf ..> UC_Grades : <<include>>
+@enduml

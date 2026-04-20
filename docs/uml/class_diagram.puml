@@ -1,0 +1,79 @@
+@startuml
+package "Entities" {
+  enum Role {
+    ADMIN
+    TEACHER
+    SECRETARY
+    STUDENT
+  }
+
+  class User {
+    +id: String
+    +email: String
+    +password: String
+    +role: Role
+  }
+
+  class Student {
+    +id: String
+    +studentId: String
+    +firstName: String
+    +lastName: String
+    +class: String
+  }
+
+  class Teacher {
+    +id: String
+    +firstName: String
+    +lastName: String
+  }
+
+  class Semester {
+    +id: String
+    +name: String
+    +year: String
+    +isActive: Boolean
+  }
+
+  class UE {
+    +id: String
+    +name: String
+    +credits: Int
+  }
+
+  class Subject {
+    +id: String
+    +name: String
+    +coefficient: Float
+  }
+
+  class Grade {
+    +ccGrade: Float
+    +examGrade: Float
+    +rattrapageGrade: Float
+  }
+
+  class Attendance {
+    +hoursAbsent: Int
+  }
+}
+
+User "1" -- "0..1" Student
+User "1" -- "0..1" Teacher
+Semester "1" *-- "many" UE
+UE "1" *-- "many" Subject
+Teacher "1" -- "many" Subject
+Student "1" -- "many" Grade
+Subject "1" -- "many" Grade
+Student "1" -- "many" Attendance
+
+package "NestJS Services" {
+  class AuthService
+  class AcademicService
+  class GradesService
+  class ExportsService
+}
+
+GradesService ..> "Calculates" Grade
+ExportsService ..> "Uses" GradesService
+@enduml

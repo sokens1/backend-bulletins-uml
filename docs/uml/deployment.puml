@@ -1,0 +1,22 @@
+@startuml
+node "PostgreSQL (Managed)" <<Render Database>> {
+  database "bulletins-db"
+}
+
+node "Web Service" <<Render Web Service>> {
+  component "NestJS Application" as App
+  component "Prisma Engine" as Prisma
+}
+
+node "Developer Workspace" {
+  component "Local Code" as Local
+  component "PlantUML Docs" as Docs
+}
+
+cloud "GitHub" as GitHub
+
+Local -> GitHub : git push
+GitHub -> App : Auto-deploy (Blueprint)
+App -> Prisma : ORM Queries
+Prisma -> "bulletins-db" : SQL over SSL
+@enduml

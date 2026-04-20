@@ -1,0 +1,29 @@
+@startuml
+actor Enseignant
+participant AuthController
+participant GradesController
+participant GradesService
+participant Prisma
+
+Enseignant -> AuthController: Login()
+AuthController -> Enseignant: JWT Token
+
+Enseignant -> GradesController: enterGrade(dto) (Auth Bearer)
+GradesController -> GradesService: enterGrade(dto)
+GradesService -> Prisma: upsert Grade
+Prisma -> GradesService: OK
+GradesService -> GradesController: OK
+
+Enseignant -> GradesController: getReport(studentId, semesterId)
+GradesController -> GradesService: calculateStudentReport(studentId, semesterId)
+
+group "Logique de Calcul"
+  GradesService -> Prisma: findMany UEs & Grades
+  note right: Moyenne = (CC*0.4) + (Exam*0.6)
+  note right: Penalty = Absences * 0.01
+  note right: Compensation si Moyenne Semestre >= 10
+end
+
+GradesService -> GradesController: Full Report JSON
+GradesController -> Enseignant: Report View
+@enduml
