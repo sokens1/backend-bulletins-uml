@@ -6,22 +6,34 @@ import { EnterGradeDto, EnterAttendanceDto } from './dto/grades.dto';
 export class GradesService {
   constructor(private prisma: DatabaseService) {}
 
-  async enterGrade(dto: EnterGradeDto, userId: string) {
-    const student = await this.prisma.student.findUnique({ where: { id: dto.studentId } });
+  private async findStudent(idOrUserId: string) {
+    const student = await this.prisma.student.findFirst({
+      where: {
+        OR: [
+          { id: idOrUserId },
+          { userId: idOrUserId }
+        ]
+      }
+    });
     if (!student) throw new NotFoundException('Student not found');
+    return student;
+  }
 
+  async enterGrade(dto: EnterGradeDto, userId: string) {
+    const student = await this.findStudent(dto.studentId);
+    
     const subject = await this.prisma.subject.findUnique({ where: { id: dto.subjectId } });
     if (!subject) throw new NotFoundException('Subject not found');
 
     const oldGrade = await this.prisma.grade.findUnique({
       where: {
-        studentId_subjectId: { studentId: dto.studentId, subjectId: dto.subjectId },
+        studentId_subjectId: { studentId: student.id, subjectId: dto.subjectId },
       },
     });
 
     const grade = await this.prisma.grade.upsert({
       where: {
-        studentId_subjectId: { studentId: dto.studentId, subjectId: dto.subjectId },
+        studentId_subjectId: { studentId: student.id, subjectId: dto.subjectId },
       },
       update: {
         ccGrade: dto.ccGrade,
@@ -29,7 +41,7 @@ export class GradesService {
         rattrapageGrade: dto.rattrapageGrade,
       },
       create: {
-        studentId: dto.studentId,
+        studentId: student.id,
         subjectId: dto.subjectId,
         ccGrade: dto.ccGrade,
         examGrade: dto.examGrade,
@@ -52,8 +64,12 @@ export class GradesService {
   }
 
   async enterAttendance(dto: EnterAttendanceDto, userId: string) {
+    const student = await this.findStudent(dto.studentId);
     const attendance = await this.prisma.attendance.create({
-      data: dto,
+      data: {
+        ...dto,
+        studentId: student.id
+      },
     });
 
     await this.prisma.auditLog.create({
@@ -70,18 +86,16 @@ export class GradesService {
   }
 
   async calculateStudentReport(studentId: string, semesterId: string) {
-    const student = await this.prisma.student.findUnique({
-      where: { id: studentId },
-    });
-    if (!student) throw new NotFoundException('Student not found');
+    const student = await this.findStudent(studentId);
+    const actualStudentId = student.id;
 
     const ues = await this.prisma.uE.findMany({
       where: { semesterId },
       include: {
         subjects: {
           include: {
-            grades: { where: { studentId } },
-            attendances: { where: { studentId } },
+            grades: { where: { studentId: actualStudentId } },
+            attendances: { where: { studentId: actualStudentId } },
           },
         },
       },
@@ -104,7 +118,7 @@ export class GradesService {
         totalPenalty += penalty;
 
         if (!grade) {
-          return { subject: subject.name, average: 0, status: 'NOT_GRADED', absences, penalty };
+          return { subject: subject.name, average: 0, status: 'NOT_GRADED', absences, penalty, credits: subject.credits };
         }
 
         let average = 0;
@@ -168,10 +182,16 @@ export class GradesService {
     const totalCreditsWon = finalReport.reduce((acc, curr) => acc + curr.creditsWon, 0);
 
     // Rank calculation
-    const rankData = await this.getStudentRank(studentId, semesterId, parseFloat(semesterAverage.toFixed(2)));
+    const rankData = await this.getStudentRank(actualStudentId, semesterId, parseFloat(semesterAverage.toFixed(2)));
+
+    // Fetch user info for name
+    const studentWithUser = await this.prisma.student.findUnique({
+      where: { id: actualStudentId },
+      include: { user: true }
+    });
 
     return {
-      student,
+      student: studentWithUser,
       semesterAverage: parseFloat(semesterAverage.toFixed(2)),
       absences: totalAbsences,
       penalty: parseFloat(totalPenalty.toFixed(2)),
@@ -271,11 +291,11 @@ export class GradesService {
 
   async calculateAnnualReport(studentId: string, year: string) {
     const semesters = await this.prisma.semester.findMany({ where: { year } });
-    const student = await this.prisma.student.findUnique({ where: { id: studentId } });
-    if (!student) throw new NotFoundException('Student not found');
+    const student = await this.findStudent(studentId);
+    const actualStudentId = student.id;
 
     const reports = await Promise.all(
-      semesters.map((s) => this.calculateStudentReport(studentId, s.id)),
+      semesters.map((s) => this.calculateStudentReport(actualStudentId, s.id)),
     );
 
     const validReports = reports.filter((r) => r.semesterAverage > 0);
