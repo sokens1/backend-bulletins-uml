@@ -3,7 +3,7 @@ services:
     name: grade-management-api
     runtime: node
     plan: free # Change to professional plan if needed
-    buildCommand: npm install && npm run build
+    buildCommand: npm install && npx prisma generate && npm run build && npx prisma migrate deploy
     startCommand: npm run start:prod
     envVars:
       - key: NODE_ENV
