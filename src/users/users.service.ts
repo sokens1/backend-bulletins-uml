@@ -36,9 +36,82 @@ export class UsersService {
     return this.prisma.teacher.findMany({
       include: {
         user: {
-          select: { email: true },
+          select: { email: true, createdAt: true },
         },
       },
+    });
+  }
+
+  async findAllStaff() {
+    return this.prisma.user.findMany({
+      where: {
+        role: { in: ['ADMIN', 'SECRETARY', 'TEACHER'] },
+      },
+      select: {
+        id: true,
+        email: true,
+        role: true,
+        createdAt: true,
+        teacher: true,
+      },
+      orderBy: { createdAt: 'desc' },
+    });
+  }
+
+  async createTeacher(data: any) {
+    const existingUser = await this.prisma.user.findUnique({ where: { email: data.email } });
+    if (existingUser) throw new ConflictException('User with this email already exists');
+
+    const hashedPassword = await bcrypt.hash(data.password || 'Inptic2024!', 10);
+
+    return this.prisma.user.create({
+      data: {
+        email: data.email,
+        password: hashedPassword,
+        role: 'TEACHER',
+        teacher: {
+          create: {
+            firstName: data.firstName,
+            lastName: data.lastName,
+          },
+        },
+      },
+      include: { teacher: true },
+    });
+  }
+
+  async createSecretary(data: any) {
+    const existingUser = await this.prisma.user.findUnique({ where: { email: data.email } });
+    if (existingUser) throw new ConflictException('User with this email already exists');
+
+    const hashedPassword = await bcrypt.hash(data.password || 'Inptic2024!', 10);
+
+    return this.prisma.user.create({
+      data: {
+        email: data.email,
+        password: hashedPassword,
+        role: 'SECRETARY',
+      },
+    });
+  }
+
+  async updateStaff(id: string, data: any) {
+    const user = await this.prisma.user.findUnique({ where: { id }, include: { teacher: true } });
+    if (!user) throw new NotFoundException('User not found');
+
+    const updateData: any = { role: data.role };
+    if (data.email) updateData.email = data.email;
+
+    if (user.role === 'TEACHER' && data.firstName && data.lastName) {
+      await this.prisma.teacher.update({
+        where: { userId: id },
+        data: { firstName: data.firstName, lastName: data.lastName },
+      });
+    }
+
+    return this.prisma.user.update({
+      where: { id },
+      data: updateData,
     });
   }
 

@@ -47,10 +47,38 @@ export class UsersController {
     return this.usersService.updateStudent(id, data);
   }
 
-  @Delete('students/:id')
+  @Delete('student/:id')
   @Roles(Role.ADMIN)
-  @ApiOperation({ summary: 'Delete a student (Admin only)' })
+  @ApiOperation({ summary: 'Delete a student and their user account' })
   deleteStudent(@Param('id') id: string) {
     return this.usersService.deleteStudent(id);
+  }
+
+  @Get('staff')
+  @Roles(Role.ADMIN)
+  @ApiOperation({ summary: 'List all staff users (Admin, Secretary, Teacher)' })
+  findAllStaff() {
+    return this.usersService.findAllStaff();
+  }
+
+  @Post('teacher')
+  @Roles(Role.ADMIN)
+  @ApiOperation({ summary: 'Create a new teacher account' })
+  createTeacher(@Body() data: any) {
+    return this.usersService.createTeacher(data);
+  }
+
+  @Post('secretary')
+  @Roles(Role.ADMIN)
+  @ApiOperation({ summary: 'Create a new secretary account' })
+  createSecretary(@Body() data: any) {
+    return this.usersService.createSecretary(data);
+  }
+
+  @Patch('staff/:id')
+  @Roles(Role.ADMIN)
+  @ApiOperation({ summary: 'Update a staff member' })
+  updateStaff(@Param('id') id: string, @Body() data: any) {
+    return this.usersService.updateStaff(id, data);
   }
 }

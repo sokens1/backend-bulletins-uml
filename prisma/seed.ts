@@ -3,37 +3,84 @@ import * as bcrypt from 'bcrypt';
 import { PrismaPg } from '@prisma/adapter-pg';
 import { Pool } from 'pg';
 
-// For Prisma 7, we must use the driver adapter even in the seed script
 const pool = new Pool({ connectionString: process.env.DATABASE_URL });
 const adapter = new PrismaPg(pool);
 const prisma = new PrismaClient({ adapter });
 
 async function main() {
+  const defaultPassword = 'Inptic2024!';
+  const hashedDefault = await bcrypt.hash(defaultPassword, 10);
+
+  // 1. Create Admin
   const adminEmail = 'admin@inptic.ga';
   const adminPassword = 'AdminPassword123!';
+  const hashedAdmin = await bcrypt.hash(adminPassword, 10);
 
-  // Check if admin already exists
-  const existingAdmin = await prisma.user.findUnique({
+  await prisma.user.upsert({
     where: { email: adminEmail },
+    update: {},
+    create: {
+      email: adminEmail,
+      password: hashedAdmin,
+      role: Role.ADMIN,
+    },
   });
+  console.log('✅ Admin: admin@inptic.ga / AdminPassword123!');
 
-  if (!existingAdmin) {
-    const hashedPassword = await bcrypt.hash(adminPassword, 10);
-    
-    await prisma.user.create({
-      data: {
-        email: adminEmail,
-        password: hashedPassword,
-        role: Role.ADMIN,
+  // 2. Create Teacher
+  const teacherEmail = 'prof@inptic.ga';
+  await prisma.user.upsert({
+    where: { email: teacherEmail },
+    update: {},
+    create: {
+      email: teacherEmail,
+      password: hashedDefault,
+      role: Role.TEACHER,
+      teacher: {
+        create: {
+          firstName: 'Jean',
+          lastName: 'Dupont',
+        },
       },
-    });
+    },
+  });
+  console.log('✅ Teacher: prof@inptic.ga / Inptic2024!');
 
-    console.log('✅ Admin user created: admin@inptic.ga / AdminPassword123!');
-  } else {
-    console.log('ℹ️ Admin user already exists.');
-  }
+  // 3. Create Secretary
+  const secEmail = 'secretariat@inptic.ga';
+  await prisma.user.upsert({
+    where: { email: secEmail },
+    update: {},
+    create: {
+      email: secEmail,
+      password: hashedDefault,
+      role: Role.SECRETARY,
+    },
+  });
+  console.log('✅ Secretary: secretariat@inptic.ga / Inptic2024!');
 
-  // Create two Semesters by default if they don't exist
+  // 4. Create Student
+  const stdEmail = 'etudiant@inptic.ga';
+  await prisma.user.upsert({
+    where: { email: stdEmail },
+    update: {},
+    create: {
+      email: stdEmail,
+      password: hashedDefault,
+      role: Role.STUDENT,
+      student: {
+        create: {
+          studentId: 'INPTIC-2024-TEST',
+          firstName: 'Alice',
+          lastName: 'Moussa',
+          class: 'LP ASUR',
+        },
+      },
+    },
+  });
+  console.log('✅ Student: etudiant@inptic.ga / Inptic2024!');
+
+  // 5. Initialize Semesters
   await prisma.semester.upsert({
     where: { id: 's5-uuid-placeholder' },
     update: {},
@@ -55,7 +102,6 @@ async function main() {
       isActive: false,
     },
   });
-
   console.log('✅ Semesters (S5, S6) initialized.');
 }
 
