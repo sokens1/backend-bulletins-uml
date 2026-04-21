@@ -1,4 +1,4 @@
-import { Controller, Get, UseGuards, Request } from '@nestjs/common';
+import { Controller, Get, Post, Patch, Delete, Body, Param, UseGuards, Request } from '@nestjs/common';
 import { UsersService } from './users.service';
 import { ApiTags, ApiOperation, ApiBearerAuth } from '@nestjs/swagger';
 import { JwtAuthGuard } from '../auth/guard/jwt-auth.guard';
@@ -31,5 +31,26 @@ export class UsersController {
   @ApiOperation({ summary: 'List all teachers (Admin, Secretary only)' })
   findAllTeachers() {
     return this.usersService.findAllTeachers();
+  }
+
+  @Post('students')
+  @Roles(Role.ADMIN, Role.SECRETARY)
+  @ApiOperation({ summary: 'Create a new student' })
+  createStudent(@Body() data: any) {
+    return this.usersService.createStudent(data);
+  }
+
+  @Patch('students/:id')
+  @Roles(Role.ADMIN, Role.SECRETARY)
+  @ApiOperation({ summary: 'Update student information' })
+  updateStudent(@Param('id') id: string, @Body() data: any) {
+    return this.usersService.updateStudent(id, data);
+  }
+
+  @Delete('students/:id')
+  @Roles(Role.ADMIN)
+  @ApiOperation({ summary: 'Delete a student (Admin only)' })
+  deleteStudent(@Param('id') id: string) {
+    return this.usersService.deleteStudent(id);
   }
 }

@@ -62,6 +62,31 @@ export class AcademicService {
           },
         },
       },
+      orderBy: { name: 'asc' },
     });
+  }
+
+  async updateUE(id: string, dto: any) {
+    const ue = await this.prisma.uE.findUnique({ where: { id } });
+    if (!ue) throw new NotFoundException('UE not found');
+    return this.prisma.uE.update({ where: { id }, data: dto });
+  }
+
+  async deleteUE(id: string) {
+    const ue = await this.prisma.uE.findUnique({ where: { id } });
+    if (!ue) throw new NotFoundException('UE not found');
+    return this.prisma.uE.delete({ where: { id } });
+  }
+
+  async updateSubject(id: string, dto: any) {
+    const subj = await this.prisma.subject.findUnique({ where: { id } });
+    if (!subj) throw new NotFoundException('Subject not found');
+    return this.prisma.subject.update({ where: { id }, data: dto });
+  }
+
+  async deleteSubject(id: string) {
+    const subj = await this.prisma.subject.findUnique({ where: { id } });
+    if (!subj) throw new NotFoundException('Subject not found');
+    return this.prisma.subject.delete({ where: { id } });
   }
 }

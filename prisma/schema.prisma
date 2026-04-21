@@ -81,6 +81,8 @@ model Subject {
   name        String   // e.g. "Anglais"
   coefficient Float    @default(1.0)
   credits     Int      @default(2) // Subject credits
+  ccWeight    Float    @default(0.4) // Weight for Continuous Assessment (e.g., 0.4 for 40%)
+  examWeight  Float    @default(0.6) // Weight for Final Exam (e.g., 0.6 for 60%)
   ueId        String
   teacherId   String?
 

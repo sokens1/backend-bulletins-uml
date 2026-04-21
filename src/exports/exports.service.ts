@@ -1,6 +1,7 @@
 import { Injectable, NotFoundException } from '@nestjs/common';
 import { GradesService } from '../grades/grades.service';
 import { DatabaseService } from '../database/database.service';
+import { UsersService } from '../users/users.service';
 import { PDFDocument, rgb, StandardFonts, PDFFont, PDFPage } from 'pdf-lib';
 import * as ExcelJS from 'exceljs';
 import * as fs from 'fs';
@@ -11,6 +12,7 @@ export class ExportsService {
   constructor(
     private gradesService: GradesService,
     private prisma: DatabaseService,
+    private usersService: UsersService,
   ) {}
 
   async generateBulletinPdf(studentId: string, semesterId: string): Promise<Buffer> {
@@ -332,6 +334,106 @@ export class ExportsService {
                 examGrade,
                 rattrapageGrade,
             }, userId);
+            count++;
+        }
+    }
+
+    return { imported: count };
+  }
+
+  async generateTemplate(type: 'STUDENTS' | 'GRADES'): Promise<Buffer> {
+    const workbook = new ExcelJS.Workbook();
+    const worksheet = workbook.addWorksheet('Template');
+
+    if (type === 'STUDENTS') {
+      worksheet.columns = [
+        { header: 'MATRICULE', key: 'studentId', width: 20 },
+        { header: 'NOM', key: 'lastName', width: 25 },
+        { header: 'PRÉNOM', key: 'firstName', width: 25 },
+        { header: 'EMAIL', key: 'email', width: 30 },
+        { header: 'CLASSE', key: 'class', width: 15 },
+        { header: 'DATE_NAISSANCE (AAAA-MM-JJ)', key: 'birthDate', width: 25 },
+        { header: 'LIEU_NAISSANCE', key: 'birthPlace', width: 25 },
+        { header: 'TYPE_BAC', key: 'bacType', width: 15 },
+        { header: 'ÉTABLISSEMENT_ORIGINE', key: 'provenance', width: 30 },
+        { header: 'MOT_DE_PASSE_INITIAL', key: 'password', width: 20 },
+      ];
+      // Add a sample row
+      worksheet.addRow({
+          studentId: 'INPTIC-2024-001',
+          lastName: 'DUPONT',
+          firstName: 'Jean',
+          email: 'jean.dupont@inptic.ga',
+          class: 'LP ASUR',
+          birthDate: '2002-05-15',
+          birthPlace: 'Libreville',
+          bacType: 'C',
+          provenance: 'Lycée Technique',
+          password: 'Password123'
+      });
+    } else {
+      worksheet.columns = [
+        { header: 'STUDENT_ID (ou Matricule)', key: 'studentId', width: 25 },
+        { header: 'SUBJECT_ID (Libellé)', key: 'subjectId', width: 25 },
+        { header: 'NOTE_CC (/20)', key: 'ccGrade', width: 15 },
+        { header: 'NOTE_EXAMEN (/20)', key: 'examGrade', width: 15 },
+        { header: 'NOTE_RATTRAPAGE (/20)', key: 'rattrapageGrade', width: 20 },
+      ];
+      worksheet.addRow({
+          studentId: 'INPTIC-2024-001',
+          subjectId: 'Anglais',
+          ccGrade: 14.5,
+          examGrade: 12,
+          rattrapageGrade: ''
+      });
+    }
+
+    // Styling headers
+    worksheet.getRow(1).font = { bold: true };
+    worksheet.getRow(1).fill = {
+      type: 'pattern',
+      pattern: 'solid',
+      fgColor: { argb: 'FFE0E0E0' }
+    };
+
+    const buffer = await workbook.xlsx.writeBuffer();
+    return Buffer.from(buffer);
+  }
+
+  async importStudentsFromExcel(buffer: Buffer) {
+    const workbook = new ExcelJS.Workbook();
+    await workbook.xlsx.load(buffer as any);
+    const worksheet = workbook.getWorksheet(1);
+    
+    if (!worksheet) throw new NotFoundException('Worksheet not found');
+
+    let count = 0;
+    for (let i = 2; i <= worksheet.rowCount; i++) {
+        const row = worksheet.getRow(i);
+        const studentId = row.getCell(1).toString();
+        const lastName = row.getCell(2).toString();
+        const firstName = row.getCell(3).toString();
+        const email = row.getCell(4).toString();
+        const className = row.getCell(5).toString();
+        const birthDateStr = row.getCell(6).toString();
+        const birthPlace = row.getCell(7).toString();
+        const bacType = row.getCell(8).toString();
+        const provenance = row.getCell(9).toString();
+        const password = row.getCell(10).toString() || 'Inptic2024!';
+
+        if (studentId && email) {
+            await this.usersService.createStudent({
+                studentId,
+                lastName,
+                firstName,
+                email,
+                class: className,
+                birthDate: birthDateStr,
+                birthPlace,
+                bacType,
+                provenance,
+                password,
+            });
             count++;
         }
     }

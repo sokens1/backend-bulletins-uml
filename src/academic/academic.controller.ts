@@ -1,4 +1,4 @@
-import { Controller, Post, Get, Body, UseGuards } from '@nestjs/common';
+import { Controller, Post, Get, Patch, Delete, Body, Param, UseGuards } from '@nestjs/common';
 import { AcademicService } from './academic.service';
 import { CreateSemesterDto, CreateUEDto, CreateSubjectDto } from './dto/academic.dto';
 import { ApiTags, ApiOperation, ApiBearerAuth } from '@nestjs/swagger';
@@ -39,5 +39,33 @@ export class AcademicController {
   @ApiOperation({ summary: 'Get the full academic structure (Semesters -> UEs -> Subjects)' })
   getStructure() {
     return this.academicService.getStructure();
+  }
+
+  @Patch('ue/:id')
+  @Roles(Role.ADMIN)
+  @ApiOperation({ summary: 'Update a Teaching Unit (UE)' })
+  updateUE(@Param('id') id: string, @Body() dto: any) {
+    return this.academicService.updateUE(id, dto);
+  }
+
+  @Delete('ue/:id')
+  @Roles(Role.ADMIN)
+  @ApiOperation({ summary: 'Delete a Teaching Unit (UE)' })
+  deleteUE(@Param('id') id: string) {
+    return this.academicService.deleteUE(id);
+  }
+
+  @Patch('subject/:id')
+  @Roles(Role.ADMIN)
+  @ApiOperation({ summary: 'Update a subject' })
+  updateSubject(@Param('id') id: string, @Body() dto: any) {
+    return this.academicService.updateSubject(id, dto);
+  }
+
+  @Delete('subject/:id')
+  @Roles(Role.ADMIN)
+  @ApiOperation({ summary: 'Delete a subject' })
+  deleteSubject(@Param('id') id: string) {
+    return this.academicService.deleteSubject(id);
   }
 }

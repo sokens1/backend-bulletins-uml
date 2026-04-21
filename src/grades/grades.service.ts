@@ -1,4 +1,4 @@
-import { Injectable, NotFoundException } from '@nestjs/common';
+import { Injectable, NotFoundException, ForbiddenException } from '@nestjs/common';
 import { DatabaseService } from '../database/database.service';
 import { EnterGradeDto, EnterAttendanceDto } from './dto/grades.dto';
 
@@ -24,6 +24,15 @@ export class GradesService {
     
     const subject = await this.prisma.subject.findUnique({ where: { id: dto.subjectId } });
     if (!subject) throw new NotFoundException('Subject not found');
+
+    // Security Check: 5.7 - Teacher can only enter grades for their own subjects
+    const user = await this.prisma.user.findUnique({ where: { id: userId } });
+    if (user?.role === 'TEACHER') {
+      const teacher = await this.prisma.teacher.findUnique({ where: { userId } });
+      if (!teacher || subject.teacherId !== teacher.id) {
+        throw new ForbiddenException('Vous n\'êtes pas autorisé à saisir des notes pour cette matière.');
+      }
+    }
 
     const oldGrade = await this.prisma.grade.findUnique({
       where: {
@@ -240,7 +249,7 @@ export class GradesService {
 
         let avg = 0;
         if (grade.rattrapageGrade !== null) avg = grade.rattrapageGrade;
-        else avg = (grade.ccGrade ?? 0) * 0.4 + (grade.examGrade ?? 0) * 0.6;
+        else avg = (grade.ccGrade ?? 0) * subj.ccWeight + (grade.examGrade ?? 0) * subj.examWeight;
         
         totalUEPoints += avg * subj.coefficient;
         totalUECoeff += subj.coefficient;
@@ -288,6 +297,7 @@ export class GradesService {
       max: averages.length > 0 ? Math.max(...averages) : 0,
       count: students.length,
       subjectStats,
+      studentResults: allReports,
     };
   }
 
@@ -326,5 +336,36 @@ export class GradesService {
       orderBy: { timestamp: 'desc' },
       take: 100,
     });
+  }
+
+  async findAllAttendances() {
+    return this.prisma.attendance.findMany({
+      include: {
+        student: true,
+        subject: true,
+      },
+      orderBy: { student: { lastName: 'asc' } },
+    });
+  }
+
+  async updateAttendance(id: string, dto: EnterAttendanceDto, userId: string) {
+    const attendance = await this.prisma.attendance.update({
+      where: { id },
+      data: {
+        hoursAbsent: dto.hoursAbsent,
+      },
+    });
+
+    await this.prisma.auditLog.create({
+      data: {
+        userId,
+        action: 'UPDATE_ATTENDANCE',
+        entity: 'Attendance',
+        entityId: attendance.id,
+        newData: attendance as any,
+      },
+    });
+
+    return attendance;
   }
 }

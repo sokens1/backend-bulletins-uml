@@ -72,4 +72,38 @@ export class ExportsController {
   ) {
     return this.exportsService.importGradesFromExcel(file.buffer, semesterId, req.user.id);
   }
+
+  @Get('template/:type')
+  @ApiOperation({ summary: 'Download an adaptive Excel template for Students or Grades' })
+  async getTemplate(
+    @Param('type') type: 'STUDENTS' | 'GRADES',
+    @Res() res: Response,
+  ) {
+    const buffer = await this.exportsService.generateTemplate(type);
+    
+    res.set({
+      'Content-Type': 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
+      'Content-Disposition': `attachment; filename=template_${type.toLowerCase()}.xlsx`,
+      'Content-Length': buffer.length,
+    });
+
+    res.end(buffer);
+  }
+
+  @Post('import-students')
+  @Roles(Role.ADMIN, Role.SECRETARY)
+  @UseInterceptors(FileInterceptor('file'))
+  @ApiConsumes('multipart/form-data')
+  @ApiOperation({ summary: 'Batch import students from an Excel file (Admin, Secretary only)' })
+  @ApiBody({
+    schema: {
+      type: 'object',
+      properties: {
+        file: { type: 'string', format: 'binary' },
+      },
+    },
+  })
+  async importStudents(@UploadedFile() file: Express.Multer.File) {
+    return this.exportsService.importStudentsFromExcel(file.buffer);
+  }
 }

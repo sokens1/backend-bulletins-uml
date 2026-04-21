@@ -52,4 +52,10 @@ export class GradesController {
   getAuditLogs() {
     return this.gradesService.getAuditLogs();
   }
+
+  @Get('stats')
+  @ApiOperation({ summary: 'Get promotion statistics for a specific semester' })
+  getStats(@Query('semesterId') semesterId: string) {
+    return this.gradesService.getPromotionStats(semesterId);
+  }
 }
