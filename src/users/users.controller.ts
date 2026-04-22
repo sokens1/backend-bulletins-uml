@@ -19,6 +19,12 @@ export class UsersController {
     return this.usersService.getProfile(req.user.id);
   }
 
+  @Patch('profile')
+  @ApiOperation({ summary: 'Update current user profile' })
+  updateProfile(@Request() req, @Body() data: any) {
+    return this.usersService.updateProfile(req.user.id, data);
+  }
+
   @Get('students')
   @Roles(Role.ADMIN, Role.SECRETARY, Role.TEACHER)
   @ApiOperation({ summary: 'List all students (Admin, Secretary, Teacher only)' })

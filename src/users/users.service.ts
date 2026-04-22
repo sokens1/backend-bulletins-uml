@@ -172,6 +172,49 @@ export class UsersService {
     });
   }
 
+  async updateProfile(userId: string, data: any) {
+    const user = await this.prisma.user.findUnique({
+      where: { id: userId },
+      include: { student: true, teacher: true },
+    });
+    if (!user) throw new NotFoundException('User not found');
+
+    if (data.email && data.email !== user.email) {
+      const existing = await this.prisma.user.findUnique({ where: { email: data.email } });
+      if (existing && existing.id !== userId) {
+        throw new ConflictException('User with this email already exists');
+      }
+      await this.prisma.user.update({ where: { id: userId }, data: { email: data.email } });
+    }
+
+    if (user.role === 'STUDENT' && user.student) {
+      await this.prisma.student.update({
+        where: { userId },
+        data: {
+          firstName: data.firstName ?? undefined,
+          lastName: data.lastName ?? undefined,
+          class: data.class ?? undefined,
+          birthDate: data.birthDate ? new Date(data.birthDate) : undefined,
+          birthPlace: data.birthPlace ?? undefined,
+          bacType: data.bacType ?? undefined,
+          provenance: data.provenance ?? undefined,
+        },
+      });
+    }
+
+    if (user.role === 'TEACHER' && user.teacher) {
+      await this.prisma.teacher.update({
+        where: { userId },
+        data: {
+          firstName: data.firstName ?? undefined,
+          lastName: data.lastName ?? undefined,
+        },
+      });
+    }
+
+    return this.getProfile(userId);
+  }
+
   async deleteStudent(id: string) {
     const student = await this.prisma.student.findUnique({ where: { id } });
     if (!student) throw new NotFoundException('Student not found');

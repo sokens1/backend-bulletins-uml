@@ -6,6 +6,7 @@ import { PDFDocument, rgb, StandardFonts, PDFFont, PDFPage } from 'pdf-lib';
 import * as ExcelJS from 'exceljs';
 import * as fs from 'fs';
 import * as path from 'path';
+import archiver from 'archiver';
 
 @Injectable()
 export class ExportsService {
@@ -313,6 +314,103 @@ export class ExportsService {
     return Buffer.from(pdfBytes);
   }
 
+  async generatePromotionXlsx(semesterId: string): Promise<Buffer> {
+    const stats = await this.gradesService.getPromotionStats(semesterId);
+    const workbook = new ExcelJS.Workbook();
+    const worksheet = workbook.addWorksheet('Promotion');
+
+    worksheet.columns = [
+      { header: 'NOM', key: 'lastName', width: 22 },
+      { header: 'PRÉNOM', key: 'firstName', width: 22 },
+      { header: 'RANG', key: 'rank', width: 10 },
+      { header: 'CRÉDITS_ACQUIS', key: 'credits', width: 15 },
+      { header: 'MOYENNE_SEMESTRE', key: 'avg', width: 18 },
+      { header: 'DÉCISION', key: 'status', width: 18 },
+    ];
+
+    (stats.studentResults || []).forEach((r: any) => {
+      worksheet.addRow({
+        lastName: r.student?.lastName || '',
+        firstName: r.student?.firstName || '',
+        rank: r.rank ?? '',
+        credits: r.totalCreditsWon ?? '',
+        avg: r.semesterAverage ?? '',
+        status: r.status ?? '',
+      });
+    });
+
+    worksheet.getRow(1).font = { bold: true };
+    const buffer = await workbook.xlsx.writeBuffer();
+    return Buffer.from(buffer);
+  }
+
+  async generateGradesXlsx(semesterId: string): Promise<Buffer> {
+    const workbook = new ExcelJS.Workbook();
+    const worksheet = workbook.addWorksheet('Notes');
+
+    worksheet.columns = [
+      { header: 'STUDENT_ID (Matricule)', key: 'studentId', width: 22 },
+      { header: 'NOM', key: 'lastName', width: 20 },
+      { header: 'PRÉNOM', key: 'firstName', width: 20 },
+      { header: 'MATIÈRE', key: 'subject', width: 30 },
+      { header: 'NOTE_CC', key: 'cc', width: 12 },
+      { header: 'NOTE_EXAMEN', key: 'exam', width: 14 },
+      { header: 'NOTE_RATTRAPAGE', key: 'rattr', width: 16 },
+    ];
+
+    const grades = await this.prisma.grade.findMany({
+      where: { subject: { ue: { semesterId } } },
+      include: { student: true, subject: true },
+      orderBy: [{ student: { lastName: 'asc' } }],
+    });
+
+    grades.forEach((g) => {
+      worksheet.addRow({
+        studentId: g.student.studentId,
+        lastName: g.student.lastName,
+        firstName: g.student.firstName,
+        subject: g.subject.name,
+        cc: g.ccGrade ?? '',
+        exam: g.examGrade ?? '',
+        rattr: g.rattrapageGrade ?? '',
+      });
+    });
+
+    worksheet.getRow(1).font = { bold: true };
+    const buffer = await workbook.xlsx.writeBuffer();
+    return Buffer.from(buffer);
+  }
+
+  async generateAllBulletinsZip(semesterId: string): Promise<Buffer> {
+    const semester = await this.prisma.semester.findUnique({ where: { id: semesterId } });
+    const students = await this.prisma.student.findMany({ orderBy: [{ lastName: 'asc' }] });
+
+    return new Promise<Buffer>(async (resolve, reject) => {
+      const archive = archiver('zip', { zlib: { level: 9 } });
+      const chunks: Buffer[] = [];
+
+      archive.on('data', (d) => chunks.push(Buffer.from(d)));
+      archive.on('warning', (err) => {
+        if ((err as any).code === 'ENOENT') return;
+        reject(err);
+      });
+      archive.on('error', (err) => reject(err));
+      archive.on('end', () => resolve(Buffer.concat(chunks)));
+
+      for (const s of students) {
+        try {
+          const pdf = await this.generateBulletinPdf(s.id, semesterId);
+          const safeName = `${(s.lastName || '').toUpperCase()}_${(s.firstName || '').toUpperCase()}_${s.studentId || s.id}`.replace(/[^a-zA-Z0-9_]+/g, '_');
+          archive.append(pdf, { name: `bulletin_${semester?.name || 'SEM'}_${safeName}.pdf` });
+        } catch {
+          // ignore missing data
+        }
+      }
+
+      archive.finalize();
+    });
+  }
+
   async importGradesFromExcel(buffer: Buffer, semesterId: string, userId: string) {
     const workbook = new ExcelJS.Workbook();
     await workbook.xlsx.load(buffer as any);
@@ -321,27 +419,55 @@ export class ExportsService {
     if (!worksheet) throw new NotFoundException('Worksheet not found');
 
     let count = 0;
+    let skipped = 0;
+    const errors: string[] = [];
     for (let i = 2; i <= worksheet.rowCount; i++) {
         const row = worksheet.getRow(i);
-        const studentId = row.getCell(1).toString();
-        const subjectId = row.getCell(2).toString();
-        const ccGrade = parseFloat(row.getCell(3).toString());
-        const examGrade = parseFloat(row.getCell(4).toString());
-        const rattrapageGrade = row.getCell(5).value ? parseFloat(row.getCell(5).toString()) : undefined;
+        const studentRef = row.getCell(1).toString().trim();
+        const subjectRef = row.getCell(2).toString().trim();
+        const ccRaw = row.getCell(3).toString().trim();
+        const examRaw = row.getCell(4).toString().trim();
+        const rattrRaw = row.getCell(5).toString().trim();
 
-        if (studentId && subjectId) {
-            await this.gradesService.enterGrade({
-                studentId,
-                subjectId,
-                ccGrade,
-                examGrade,
-                rattrapageGrade,
-            }, userId);
-            count++;
+        if (!studentRef || !subjectRef) {
+          skipped++;
+          continue;
         }
+
+        const student = await this.prisma.student.findFirst({
+          where: {
+            OR: [{ id: studentRef }, { studentId: studentRef }],
+          },
+        });
+
+        const subject = await this.prisma.subject.findFirst({
+          where: {
+            ue: { semesterId },
+            OR: [{ id: subjectRef }, { name: { equals: subjectRef, mode: 'insensitive' } }],
+          },
+        });
+
+        if (!student || !subject) {
+          skipped++;
+          errors.push(`Ligne ${i}: étudiant ou matière introuvable (${studentRef} / ${subjectRef})`);
+          continue;
+        }
+
+        const ccGrade = ccRaw !== '' ? Number(ccRaw) : undefined;
+        const examGrade = examRaw !== '' ? Number(examRaw) : undefined;
+        const rattrapageGrade = rattrRaw !== '' ? Number(rattrRaw) : undefined;
+
+        await this.gradesService.enterGrade({
+            studentId: student.id,
+            subjectId: subject.id,
+            ccGrade: Number.isFinite(ccGrade as number) ? ccGrade : undefined,
+            examGrade: Number.isFinite(examGrade as number) ? examGrade : undefined,
+            rattrapageGrade: Number.isFinite(rattrapageGrade as number) ? rattrapageGrade : undefined,
+        }, userId);
+        count++;
     }
 
-    return { imported: count };
+    return { imported: count, skipped, errors };
   }
 
   async generateTemplate(type: 'STUDENTS' | 'GRADES'): Promise<Buffer> {

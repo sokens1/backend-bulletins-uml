@@ -51,6 +51,54 @@ export class ExportsController {
     res.end(buffer);
   }
 
+  @Get('promotion')
+  @Roles(Role.ADMIN, Role.SECRETARY)
+  @ApiOperation({ summary: 'Download promotion export in XLSX' })
+  async downloadPromotionXlsx(
+    @Query('semesterId') semesterId: string,
+    @Res() res: Response,
+  ) {
+    const buffer = await this.exportsService.generatePromotionXlsx(semesterId);
+    res.set({
+      'Content-Type': 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
+      'Content-Disposition': `attachment; filename=promotion_${semesterId}.xlsx`,
+      'Content-Length': buffer.length,
+    });
+    res.end(buffer);
+  }
+
+  @Get('grades')
+  @Roles(Role.ADMIN, Role.SECRETARY, Role.TEACHER)
+  @ApiOperation({ summary: 'Download grades export in XLSX (semester)' })
+  async downloadGradesXlsx(
+    @Query('semesterId') semesterId: string,
+    @Res() res: Response,
+  ) {
+    const buffer = await this.exportsService.generateGradesXlsx(semesterId);
+    res.set({
+      'Content-Type': 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
+      'Content-Disposition': `attachment; filename=notes_${semesterId}.xlsx`,
+      'Content-Length': buffer.length,
+    });
+    res.end(buffer);
+  }
+
+  @Get('bulletins-zip')
+  @Roles(Role.ADMIN, Role.SECRETARY)
+  @ApiOperation({ summary: 'Download all bulletins of a semester as ZIP' })
+  async downloadAllBulletinsZip(
+    @Query('semesterId') semesterId: string,
+    @Res() res: Response,
+  ) {
+    const buffer = await this.exportsService.generateAllBulletinsZip(semesterId);
+    res.set({
+      'Content-Type': 'application/zip',
+      'Content-Disposition': `attachment; filename=bulletins_${semesterId}.zip`,
+      'Content-Length': buffer.length,
+    });
+    res.end(buffer);
+  }
+
   @Post('import-grades')
   @Roles(Role.ADMIN, Role.SECRETARY)
   @UseInterceptors(FileInterceptor('file'))
