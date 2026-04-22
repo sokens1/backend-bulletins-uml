@@ -223,6 +223,11 @@ export class ExportsService {
 
   async generateAnnualBulletinPdf(studentId: string, year: string): Promise<Buffer> {
     const annualReport = await this.gradesService.calculateAnnualReport(studentId, year);
+    const semesters = await this.prisma.semester.findMany({
+      where: { year },
+      orderBy: { name: 'asc' },
+    });
+    const semesterNameById = new Map(semesters.map((s) => [s.id, s.name]));
     
     const pdfDoc = await PDFDocument.create();
     const page = pdfDoc.addPage([595.28, 841.89]);
@@ -257,55 +262,88 @@ export class ExportsService {
 
     // Annual Table
     currentY -= 60;
-    const cols = { label: 45, coeff: 350, notes: 410, rang: 470, avgClass: 520 };
-    page.drawRectangle({ x: 40, y: currentY - 20, width: width - 80, height: 20, color: rgb(0.9, 0.95, 1), borderColor: rgb(0,0,0), borderWidth: 1 });
-    page.drawText('Unités d\'Enseignement', { x: cols.label, y: currentY - 13, size: 9, font: fontBold });
-    page.drawText('Coefficients', { x: cols.coeff, y: currentY - 13, size: 7, font: fontBold });
-    page.drawText('Notes', { x: cols.notes, y: currentY - 13, size: 7, font: fontBold });
-    page.drawText('Rang', { x: cols.rang, y: currentY - 13, size: 7, font: fontBold });
-    page.drawText('Moyenne classe', { x: cols.avgClass, y: currentY - 13, size: 7, font: fontBold });
+    const tableLeft = 40;
+    const tableWidth = width - 80;
+    const cols = {
+      ueStart: 40,
+      sessionStart: 350,
+      avgStart: 455,
+      tableEnd: 555.28,
+    };
+    const drawColumnLines = (topY: number, rowHeight: number) => {
+      const bottomY = topY - rowHeight;
+      [cols.sessionStart, cols.avgStart].forEach((x) => {
+        page.drawLine({
+          start: { x, y: topY },
+          end: { x, y: bottomY },
+          color: rgb(0, 0, 0),
+          thickness: 0.5,
+        });
+      });
+    };
+
+    page.drawRectangle({ x: tableLeft, y: currentY - 20, width: tableWidth, height: 20, color: rgb(0.9, 0.95, 1), borderColor: rgb(0,0,0), borderWidth: 1 });
+    drawColumnLines(currentY, 20);
+    page.drawText('Unité d\'Enseignement', { x: 45, y: currentY - 13, size: 9, font: fontBold });
+    page.drawText('Session', { x: cols.sessionStart + 10, y: currentY - 13, size: 8, font: fontBold });
+    page.drawText('Moyenne', { x: cols.avgStart + 10, y: currentY - 13, size: 8, font: fontBold });
 
     currentY -= 20;
 
-    // We assume S1 and S2 are the two semesters in the year
-    const s1Report = annualReport.semesterReports[0];
-    const s2Report = annualReport.semesterReports[1];
+    const s5Report = annualReport.semesterReports.find(
+      (r) => semesterNameById.get(r.semesterId) === 'S5',
+    );
+    const s6Report = annualReport.semesterReports.find(
+      (r) => semesterNameById.get(r.semesterId) === 'S6',
+    );
 
-    if (s1Report) {
-      for (const ue of s1Report.report) {
-         page.drawRectangle({ x: 40, y: currentY - 15, width: width - 80, height: 15, color: rgb(0.95, 0.95, 0.95), borderColor: rgb(0,0,0), borderWidth: 0.5 });
-         page.drawText(`${ue.ueCode || 'UE'}: ${ue.ueName}`, { x: 45, y: currentY - 11, size: 8, font: fontBold, color: rgb(0, 0, 0.4) });
-         currentY -= 15;
+    if (s5Report) {
+      for (const ue of s5Report.report) {
+        page.drawRectangle({ x: tableLeft, y: currentY - 15, width: tableWidth, height: 15, color: rgb(0.95, 0.95, 0.95), borderColor: rgb(0,0,0), borderWidth: 0.5 });
+        drawColumnLines(currentY, 15);
+        page.drawText(`${ue.ueCode || 'UE'}: ${ue.ueName}`, { x: 45, y: currentY - 11, size: 8, font: fontBold, color: rgb(0, 0, 0.4) });
+        currentY -= 15;
 
-         // Row for S1
-         page.drawRectangle({ x: 40, y: currentY - 15, width: width - 80, height: 15, borderColor: rgb(0,0,0), borderWidth: 0.5 });
-         page.drawText('Semestre 1', { x: 70, y: currentY - 11, size: 8, font: fontNormal });
-         page.drawText(Number(ue.average ?? 0).toFixed(2), { x: cols.notes + 10, y: currentY - 11, size: 8, font: fontBold });
-         currentY -= 15;
+        // Row for S5
+        page.drawRectangle({ x: tableLeft, y: currentY - 15, width: tableWidth, height: 15, borderColor: rgb(0,0,0), borderWidth: 0.5 });
+        drawColumnLines(currentY, 15);
+        page.drawText('S5', { x: cols.sessionStart + 10, y: currentY - 11, size: 8, font: fontNormal });
+        page.drawText(Number(ue.average ?? 0).toFixed(2), { x: cols.avgStart + 10, y: currentY - 11, size: 8, font: fontBold });
+        currentY -= 15;
 
-         // Find same UE in S2
-         const ueS2 = s2Report?.report.find(u => u.ueName === ue.ueName);
-         if (ueS2) {
-            page.drawRectangle({ x: 40, y: currentY - 15, width: width - 80, height: 15, borderColor: rgb(0,0,0), borderWidth: 0.5 });
-            page.drawText('Semestre 2', { x: 70, y: currentY - 11, size: 8, font: fontNormal });
-           page.drawText(Number(ueS2.average ?? 0).toFixed(2), { x: cols.notes + 10, y: currentY - 11, size: 8, font: fontBold });
-            currentY -= 15;
-            
-            // Annual Row for this UE
-            page.drawRectangle({ x: 40, y: currentY - 15, width: width - 80, height: 15, color: rgb(1, 1, 0.9), borderColor: rgb(0,0,0), borderWidth: 0.5 });
-            page.drawText('Annuel', { x: 70, y: currentY - 11, size: 8, font: fontBold });
-            const annualUEAvg = ((ue.average + ueS2.average) / 2).toFixed(2);
-            page.drawText(annualUEAvg, { x: cols.notes + 10, y: currentY - 11, size: 8, font: fontBold });
-            currentY -= 15;
-         }
+        // Find same UE in S6 by UE code first, then UE name
+        const ueS6 = s6Report?.report.find(
+          (u) => (u.ueCode && ue.ueCode ? u.ueCode === ue.ueCode : u.ueName === ue.ueName),
+        );
+        if (ueS6) {
+          page.drawRectangle({ x: tableLeft, y: currentY - 15, width: tableWidth, height: 15, borderColor: rgb(0,0,0), borderWidth: 0.5 });
+          drawColumnLines(currentY, 15);
+          page.drawText('S6', { x: cols.sessionStart + 10, y: currentY - 11, size: 8, font: fontNormal });
+          page.drawText(Number(ueS6.average ?? 0).toFixed(2), { x: cols.avgStart + 10, y: currentY - 11, size: 8, font: fontBold });
+          currentY -= 15;
+
+          // Annual Row for this UE
+          page.drawRectangle({ x: tableLeft, y: currentY - 15, width: tableWidth, height: 15, color: rgb(1, 1, 0.9), borderColor: rgb(0,0,0), borderWidth: 0.5 });
+          drawColumnLines(currentY, 15);
+          page.drawText('Annuel', { x: cols.sessionStart + 10, y: currentY - 11, size: 8, font: fontBold });
+          const annualUEAvg = ((ue.average + ueS6.average) / 2).toFixed(2);
+          page.drawText(annualUEAvg, { x: cols.avgStart + 10, y: currentY - 11, size: 8, font: fontBold });
+          currentY -= 15;
+        }
       }
     }
 
     // Final Annual Result
     currentY -= 30;
-    page.drawRectangle({ x: 40, y: currentY - 40, width: width - 80, height: 40, borderColor: rgb(0,0,0), borderWidth: 2 });
-    page.drawText('MOYENNE ANNUELLE GENERALE', { x: 60, y: currentY - 25, size: 12, font: fontBold });
-    page.drawText(Number(annualReport.annualAverage ?? 0).toFixed(2), { x: cols.notes, y: currentY - 25, size: 14, font: fontBold, color: rgb(0, 0, 0.8) });
+    page.drawRectangle({ x: tableLeft, y: currentY - 40, width: tableWidth, height: 40, borderColor: rgb(0,0,0), borderWidth: 2 });
+    page.drawLine({
+      start: { x: cols.avgStart, y: currentY },
+      end: { x: cols.avgStart, y: currentY - 40 },
+      color: rgb(0, 0, 0),
+      thickness: 1,
+    });
+    page.drawText('Moyenne de l\'étudiant', { x: 60, y: currentY - 25, size: 11, font: fontBold });
+    page.drawText(Number(annualReport.annualAverage ?? 0).toFixed(2), { x: cols.avgStart + 20, y: currentY - 25, size: 14, font: fontBold, color: rgb(0, 0, 0.8) });
     
     page.drawText(`DÉCISION : ${annualReport.status.toUpperCase()}`, { x: 60, y: currentY - 60, size: 11, font: fontBold });
     page.drawText(`MENTION : ${annualReport.mention.toUpperCase()}`, { x: 300, y: currentY - 60, size: 11, font: fontBold });
