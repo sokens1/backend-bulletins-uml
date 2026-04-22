@@ -21,6 +21,17 @@ export class GradesController {
     return this.gradesService.enterGrade(dto, req.user.id);
   }
 
+  @Get('existing')
+  @Roles(Role.ADMIN, Role.TEACHER, Role.SECRETARY)
+  @ApiOperation({ summary: 'Get existing grade for student and subject' })
+  getExistingGrade(
+    @Query('studentId') studentId: string,
+    @Query('subjectId') subjectId: string,
+    @Request() req,
+  ) {
+    return this.gradesService.getStudentSubjectGrade(studentId, subjectId, req.user.id);
+  }
+
   @Post('attendance')
   @Roles(Role.ADMIN, Role.SECRETARY)
   @ApiOperation({ summary: 'Register student attendance/absence (Secretary, Admin only)' })

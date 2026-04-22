@@ -7,9 +7,10 @@ import { AcademicModule } from './academic/academic.module';
 import { GradesModule } from './grades/grades.module';
 import { UsersModule } from './users/users.module';
 import { ExportsModule } from './exports/exports.module';
+import { SettingsModule } from './settings/settings.module';
 
 @Module({
-  imports: [DatabaseModule, AuthModule, AcademicModule, GradesModule, UsersModule, ExportsModule],
+  imports: [DatabaseModule, AuthModule, AcademicModule, GradesModule, UsersModule, ExportsModule, SettingsModule],
   controllers: [ApplicationController],
   providers: [ApplicationService],
 })

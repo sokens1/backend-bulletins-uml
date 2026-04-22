@@ -17,6 +17,9 @@ export class ExportsService {
 
   async generateBulletinPdf(studentId: string, semesterId: string): Promise<Buffer> {
     const report = await this.gradesService.calculateStudentReport(studentId, semesterId);
+    if (!report || !report.student) {
+      throw new NotFoundException('Données de l\'étudiant introuvables pour ce bulletin.');
+    }
     const globalStats = await this.gradesService.getPromotionStats(semesterId);
     const semester = await this.prisma.semester.findUnique({ where: { id: semesterId } });
     

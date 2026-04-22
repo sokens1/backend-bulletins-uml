@@ -1,4 +1,4 @@
-import { Controller, Get, Post, Patch, Body, Param, UseGuards, Request } from '@nestjs/common';
+import { Controller, Get, Post, Patch, Delete, Body, Param, UseGuards, Request } from '@nestjs/common';
 import { GradesService } from './grades.service';
 import { EnterAttendanceDto } from './dto/grades.dto';
 import { ApiTags, ApiOperation, ApiBearerAuth } from '@nestjs/swagger';
@@ -33,5 +33,12 @@ export class AttendanceController {
   @ApiOperation({ summary: 'Update an attendance record' })
   update(@Param('id') id: string, @Body() dto: EnterAttendanceDto, @Request() req) {
     return this.gradesService.updateAttendance(id, dto, req.user.id);
+  }
+
+  @Delete(':id')
+  @Roles(Role.ADMIN, Role.SECRETARY)
+  @ApiOperation({ summary: 'Delete an attendance record' })
+  remove(@Param('id') id: string, @Request() req) {
+    return this.gradesService.deleteAttendance(id, req.user.id);
   }
 }

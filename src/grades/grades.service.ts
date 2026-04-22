@@ -5,6 +5,9 @@ import { EnterGradeDto, EnterAttendanceDto } from './dto/grades.dto';
 @Injectable()
 export class GradesService {
   constructor(private prisma: DatabaseService) {}
+  private readonly absencePenaltyPerHour = Number(process.env.ABSENCE_PENALTY_PER_HOUR ?? 0.01);
+  private readonly soutenanceUeCode = process.env.SOUTENANCE_UE_CODE ?? 'UE6-2';
+  private readonly soutenanceRetakeEnabled = (process.env.ENABLE_SOUTENANCE_RETAKE ?? 'true') === 'true';
 
   private async findStudent(idOrUserId: string) {
     const student = await this.prisma.student.findFirst({
@@ -72,6 +75,26 @@ export class GradesService {
     return grade;
   }
 
+  async getStudentSubjectGrade(studentId: string, subjectId: string, userId: string) {
+    const student = await this.findStudent(studentId);
+    const subject = await this.prisma.subject.findUnique({ where: { id: subjectId } });
+    if (!subject) throw new NotFoundException('Subject not found');
+
+    const user = await this.prisma.user.findUnique({ where: { id: userId } });
+    if (user?.role === 'TEACHER') {
+      const teacher = await this.prisma.teacher.findUnique({ where: { userId } });
+      if (!teacher || subject.teacherId !== teacher.id) {
+        throw new ForbiddenException('Vous n\'êtes pas autorisé à consulter les notes de cette matière.');
+      }
+    }
+
+    return this.prisma.grade.findUnique({
+      where: {
+        studentId_subjectId: { studentId: student.id, subjectId },
+      },
+    });
+  }
+
   async enterAttendance(dto: EnterAttendanceDto, userId: string) {
     const student = await this.findStudent(dto.studentId);
     const attendance = await this.prisma.attendance.create({
@@ -92,6 +115,26 @@ export class GradesService {
     });
 
     return attendance;
+  }
+
+  private computeSubjectAverage(grade: {
+    ccGrade: number | null;
+    examGrade: number | null;
+    rattrapageGrade: number | null;
+  }, ccWeight: number, examWeight: number) {
+    if (grade.rattrapageGrade !== null && grade.rattrapageGrade !== undefined) {
+      return grade.rattrapageGrade;
+    }
+
+    if (grade.ccGrade !== null && (grade.examGrade === null || grade.examGrade === undefined)) {
+      return grade.ccGrade;
+    }
+
+    if (grade.examGrade !== null && (grade.ccGrade === null || grade.ccGrade === undefined)) {
+      return grade.examGrade;
+    }
+
+    return (grade.ccGrade ?? 0) * ccWeight + (grade.examGrade ?? 0) * examWeight;
   }
 
   async calculateStudentReport(studentId: string, semesterId: string) {
@@ -122,7 +165,7 @@ export class GradesService {
       const subjectReports = ue.subjects.map((subject) => {
         const grade = subject.grades[0];
         const absences = subject.attendances.reduce((acc, curr) => acc + curr.hoursAbsent, 0);
-        const penalty = absences * 0.01;
+        const penalty = absences * this.absencePenaltyPerHour;
         totalAbsences += absences;
         totalPenalty += penalty;
 
@@ -130,18 +173,11 @@ export class GradesService {
           return { subject: subject.name, average: 0, status: 'NOT_GRADED', absences, penalty, credits: subject.credits };
         }
 
-        let average = 0;
-        if (grade.rattrapageGrade !== null && grade.rattrapageGrade !== undefined) {
-          average = grade.rattrapageGrade;
-        } else {
-          if (grade.ccGrade !== null && (grade.examGrade === null || grade.examGrade === undefined)) {
-            average = grade.ccGrade;
-          } else if (grade.examGrade !== null && (grade.ccGrade === null || grade.ccGrade === undefined)) {
-            average = grade.examGrade;
-          } else {
-            average = (grade.ccGrade ?? 0) * 0.4 + (grade.examGrade ?? 0) * 0.6;
-          }
-        }
+        let average = this.computeSubjectAverage(
+          grade,
+          subject.ccWeight ?? 0.4,
+          subject.examWeight ?? 0.6,
+        );
 
         average = Math.max(0, average - penalty);
         totalUEPoints += average * subject.coefficient;
@@ -189,6 +225,7 @@ export class GradesService {
     });
 
     const totalCreditsWon = finalReport.reduce((acc, curr) => acc + curr.creditsWon, 0);
+    const isSemesterValidated = totalCreditsWon >= totalSemesterCredits;
 
     // Rank calculation
     const rankData = await this.getStudentRank(actualStudentId, semesterId, parseFloat(semesterAverage.toFixed(2)));
@@ -203,14 +240,16 @@ export class GradesService {
 
     return {
       student: studentWithUser,
+      semesterId,
       semesterAverage: parseFloat(semesterAverage.toFixed(2)),
       absences: totalAbsences,
       penalty: parseFloat(totalPenalty.toFixed(2)),
       report: finalReport,
       totalCreditsWon,
+      totalCreditsExpected: totalSemesterCredits,
       rank: rankData.rank,
       totalStudents: rankData.total,
-      status: semesterAverage >= 10 ? 'Semestre validé' : 'Semestre non validé',
+      status: isSemesterValidated ? 'Semestre validé' : 'Semestre non validé',
     };
   }
 
@@ -233,7 +272,14 @@ export class GradesService {
   private async calculateStudentReportRaw(studentId: string, semesterId: string) {
     const ues = await this.prisma.uE.findMany({
       where: { semesterId },
-      include: { subjects: { include: { grades: { where: { studentId } } } } },
+      include: {
+        subjects: {
+          include: {
+            grades: { where: { studentId } },
+            attendances: { where: { studentId } },
+          },
+        },
+      },
     });
 
     let totalSemesterPoints = 0;
@@ -247,9 +293,10 @@ export class GradesService {
         const grade = subj.grades[0];
         if (!grade) continue;
 
-        let avg = 0;
-        if (grade.rattrapageGrade !== null) avg = grade.rattrapageGrade;
-        else avg = (grade.ccGrade ?? 0) * subj.ccWeight + (grade.examGrade ?? 0) * subj.examWeight;
+        const absences = subj.attendances.reduce((acc, curr) => acc + curr.hoursAbsent, 0);
+        const penalty = absences * this.absencePenaltyPerHour;
+        const rawAvg = this.computeSubjectAverage(grade, subj.ccWeight, subj.examWeight);
+        const avg = Math.max(0, rawAvg - penalty);
         
         totalUEPoints += avg * subj.coefficient;
         totalUECoeff += subj.coefficient;
@@ -264,25 +311,47 @@ export class GradesService {
   }
 
   async getPromotionStats(semesterId: string) {
-    const students = await this.prisma.student.findMany();
-    const allReports = await Promise.all(
-      students.map((s) => this.calculateStudentReport(s.id, semesterId)),
+    const students = await this.prisma.student.findMany({
+      include: { user: true }
+    });
+    
+    // Use the raw calculation to avoid the getStudentRank recursive chain
+    const studentAverages = await Promise.all(
+      students.map(async (s) => ({
+        id: s.id,
+        lastName: s.lastName,
+        firstName: s.firstName,
+        avg: await this.calculateStudentReportRaw(s.id, semesterId)
+      }))
     );
 
-    const averages = allReports.map((r) => r.semesterAverage);
+    const averages = studentAverages.map(s => s.avg);
+    const sortedAverages = [...averages].sort((a, b) => b - a);
     
-    // Calculate per-subject averages
+    // Simplified subject stats calculation
     const subjects = await this.prisma.subject.findMany({
       where: { ue: { semesterId } },
     });
 
+    // Instead of re-calculating everything, let's fetch all grades for this semester once
+    const allGrades = await this.prisma.grade.findMany({
+      where: { subject: { ue: { semesterId } } },
+      include: { subject: true }
+    });
+
     const subjectStats = subjects.map((subj) => {
-      const subjectGrades = allReports
-        .flatMap((r) => r.report.flatMap((ue) => ue.subjects))
-        .filter((s) => s.subject === subj.name);
-      
-      const avg = subjectGrades.length > 0 
-        ? subjectGrades.reduce((acc, curr) => acc + curr.average, 0) / subjectGrades.length 
+      const subjGrades = allGrades.filter(g => g.subjectId === subj.id);
+      const subjAvgs = subjGrades.map(g => {
+        const avg = this.computeSubjectAverage(
+          g,
+          g.subject.ccWeight ?? 0.4,
+          g.subject.examWeight ?? 0.6,
+        );
+        return avg;
+      });
+
+      const avg = subjAvgs.length > 0 
+        ? subjAvgs.reduce((a, b) => a + b, 0) / subjAvgs.length 
         : 0;
 
       return {
@@ -297,7 +366,12 @@ export class GradesService {
       max: averages.length > 0 ? Math.max(...averages) : 0,
       count: students.length,
       subjectStats,
-      studentResults: allReports,
+      studentResults: studentAverages.map(s => ({
+        studentId: s.id,
+        semesterAverage: parseFloat(s.avg.toFixed(2)),
+        // Rank can be determined from sortedAverages
+        rank: sortedAverages.indexOf(s.avg) + 1
+      })),
     };
   }
 
@@ -310,22 +384,58 @@ export class GradesService {
       semesters.map((s) => this.calculateStudentReport(actualStudentId, s.id)),
     );
 
-    const validReports = reports.filter((r) => r.semesterAverage > 0);
-    const annualAverage = validReports.length > 0 
-      ? validReports.reduce((acc, curr) => acc + curr.semesterAverage, 0) / validReports.length 
-      : 0;
+    const reportBySemesterName = semesters.reduce<Record<string, (typeof reports)[number]>>((acc, semester, index) => {
+      acc[semester.name] = reports[index];
+      return acc;
+    }, {});
+    const s5Report = reportBySemesterName['S5'];
+    const s6Report = reportBySemesterName['S6'];
 
-    let mention = 'Passable';
+    const annualAverage =
+      s5Report && s6Report
+        ? (s5Report.semesterAverage + s6Report.semesterAverage) / 2
+        : reports.length > 0
+          ? reports.reduce((acc, curr) => acc + curr.semesterAverage, 0) / reports.length
+          : 0;
+
+    let mention = 'Non attribuée';
     if (annualAverage >= 16) mention = 'Très Bien';
     else if (annualAverage >= 14) mention = 'Bien';
     else if (annualAverage >= 12) mention = 'Assez Bien';
+    else if (annualAverage >= 10) mention = 'Passable';
+
+    const totalCreditsWon = reports.reduce((acc, curr) => acc + (curr.totalCreditsWon ?? 0), 0);
+    const totalCreditsExpected = reports.reduce((acc, curr) => acc + (curr.totalCreditsExpected ?? 0), 0);
+    const semestersValidated = reports.every((r) => (r.totalCreditsWon ?? 0) >= (r.totalCreditsExpected ?? 0));
+
+    const soutenanceUe = reports
+      .flatMap((r) => r.report ?? [])
+      .find((ue) => ue.ueCode === this.soutenanceUeCode);
+    const soutenanceCredits = soutenanceUe?.creditsExpected ?? 0;
+    const soutenanceNotAcquired = soutenanceUe ? soutenanceUe.creditsWon < soutenanceCredits : false;
+
+    const canRetakeSoutenance =
+      this.soutenanceRetakeEnabled &&
+      !!soutenanceUe &&
+      soutenanceNotAcquired &&
+      totalCreditsWon >= totalCreditsExpected - soutenanceCredits;
+
+    let juryDecision = 'Redouble la Licence 3';
+    if (semestersValidated && totalCreditsWon >= 60) {
+      juryDecision = 'Diplômé(e)';
+    } else if (canRetakeSoutenance) {
+      juryDecision = 'Reprise de soutenance';
+    }
 
     return {
       student,
       year,
       annualAverage: parseFloat(annualAverage.toFixed(2)),
-      semesterReports: validReports,
+      semesterReports: reports,
+      totalCreditsWon,
+      totalCreditsExpected,
       status: annualAverage >= 10 ? 'Admis(e)' : 'Ajourné(e)',
+      juryDecision,
       mention,
     };
   }
@@ -363,6 +473,24 @@ export class GradesService {
         entity: 'Attendance',
         entityId: attendance.id,
         newData: attendance as any,
+      },
+    });
+
+    return attendance;
+  }
+
+  async deleteAttendance(id: string, userId: string) {
+    const attendance = await this.prisma.attendance.delete({
+      where: { id },
+    });
+
+    await this.prisma.auditLog.create({
+      data: {
+        userId,
+        action: 'DELETE_ATTENDANCE',
+        entity: 'Attendance',
+        entityId: id,
+        oldData: attendance as any,
       },
     });
 
