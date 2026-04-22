@@ -69,4 +69,10 @@ export class GradesController {
   getStats(@Query('semesterId') semesterId: string) {
     return this.gradesService.getPromotionStats(semesterId);
   }
+  @Get('stats-annual')
+  @Roles(Role.ADMIN, Role.SECRETARY)
+  @ApiOperation({ summary: 'Get annual promotion statistics for a specific year' })
+  getAnnualStats(@Query('year') year: string) {
+    return this.gradesService.getAnnualPromotionStats(year);
+  }
 }

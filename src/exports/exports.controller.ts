@@ -99,6 +99,22 @@ export class ExportsController {
     res.end(buffer);
   }
 
+  @Get('bulletins-annual-zip')
+  @Roles(Role.ADMIN, Role.SECRETARY)
+  @ApiOperation({ summary: 'Download all annual bulletins of a specific year as ZIP' })
+  async downloadAllAnnualBulletinsZip(
+    @Query('year') year: string,
+    @Res() res: Response,
+  ) {
+    const buffer = await this.exportsService.generateAllAnnualBulletinsZip(year);
+    res.set({
+      'Content-Type': 'application/zip',
+      'Content-Disposition': `attachment; filename=bulletins_annuels_${year.replace(/\s+/g, '_')}.zip`,
+      'Content-Length': buffer.length,
+    });
+    res.end(buffer);
+  }
+
   @Post('import-grades')
   @Roles(Role.ADMIN, Role.SECRETARY)
   @UseInterceptors(FileInterceptor('file'))

@@ -161,8 +161,6 @@ export class GradesService {
 
     let totalSemesterPoints = 0;
     let totalSemesterCredits = 0;
-    let totalAbsences = 0;
-    let totalPenalty = 0;
 
     const ueReports = ues.map((ue) => {
       let totalUEPoints = 0;
@@ -170,22 +168,17 @@ export class GradesService {
 
       const subjectReports = ue.subjects.map((subject) => {
         const grade = subject.grades[0];
-        const absences = subject.attendances.reduce((acc, curr) => acc + curr.hoursAbsent, 0);
-        const penalty = absences * rules.absencePenaltyPerHour;
-        totalAbsences += absences;
-        totalPenalty += penalty;
 
         if (!grade) {
-          return { subject: subject.name, average: 0, status: 'NOT_GRADED', absences, penalty, credits: subject.credits };
+          return { subject: subject.name, average: 0, status: 'NOT_GRADED', credits: subject.credits };
         }
 
-        let average = this.computeSubjectAverage(
+        const average = this.computeSubjectAverage(
           grade,
           subject.ccWeight ?? 0.4,
           subject.examWeight ?? 0.6,
         );
 
-        average = Math.max(0, average - penalty);
         totalUEPoints += average * subject.coefficient;
         totalUECoeff += subject.coefficient;
 
@@ -193,8 +186,6 @@ export class GradesService {
           subject: subject.name,
           average: parseFloat(average.toFixed(2)),
           credits: subject.credits,
-          absences,
-          penalty: parseFloat(penalty.toFixed(2)),
           grade,
         };
       });
@@ -248,8 +239,6 @@ export class GradesService {
       student: studentWithUser,
       semesterId,
       semesterAverage: parseFloat(semesterAverage.toFixed(2)),
-      absences: totalAbsences,
-      penalty: parseFloat(totalPenalty.toFixed(2)),
       report: finalReport,
       totalCreditsWon,
       totalCreditsExpected: totalSemesterCredits,
@@ -300,10 +289,7 @@ export class GradesService {
         const grade = subj.grades[0];
         if (!grade) continue;
 
-        const absences = subj.attendances.reduce((acc, curr) => acc + curr.hoursAbsent, 0);
-        const penalty = absences * rules.absencePenaltyPerHour;
-        const rawAvg = this.computeSubjectAverage(grade, subj.ccWeight, subj.examWeight);
-        const avg = Math.max(0, rawAvg - penalty);
+        const avg = this.computeSubjectAverage(grade, subj.ccWeight, subj.examWeight);
         
         totalUEPoints += avg * subj.coefficient;
         totalUECoeff += subj.coefficient;
@@ -369,8 +355,8 @@ export class GradesService {
 
     return {
       classAverage: parseFloat((averages.reduce((a, b) => a + b, 0) / averages.length || 0).toFixed(2)),
-      min: averages.length > 0 ? Math.min(...averages) : 0,
-      max: averages.length > 0 ? Math.max(...averages) : 0,
+      min: parseFloat((averages.length > 0 ? Math.min(...averages) : 0).toFixed(2)),
+      max: parseFloat((averages.length > 0 ? Math.max(...averages) : 0).toFixed(2)),
       count: students.length,
       subjectStats,
       studentResults: studentAverages.map(s => ({
@@ -385,6 +371,45 @@ export class GradesService {
         rank: sortedAverages.indexOf(s.avg) + 1,
         totalCreditsWon: s.avg >= 10 ? 30 : 0,
         status: s.avg >= 10 ? 'Semestre validé' : 'Semestre non validé',
+      })),
+    };
+  }
+
+  async getAnnualPromotionStats(year: string) {
+    const students = await this.prisma.student.findMany({
+      include: { user: true }
+    });
+
+    const studentReports = await Promise.all(
+      students.map(async (s) => {
+        const report = await this.calculateAnnualReport(s.id, year);
+        return {
+          studentId: s.id,
+          student: {
+            id: s.id,
+            firstName: s.firstName,
+            lastName: s.lastName,
+          },
+          annualAverage: report.annualAverage,
+          status: report.status,
+          juryDecision: report.juryDecision,
+          mention: report.mention,
+          totalCreditsWon: report.totalCreditsWon,
+        };
+      })
+    );
+
+    const averages = studentReports.map(r => r.annualAverage);
+    const sortedAverages = [...averages].sort((a, b) => b - a);
+
+    return {
+      classAverage: parseFloat((averages.reduce((a, b) => a + b, 0) / averages.length || 0).toFixed(2)),
+      min: parseFloat((averages.length > 0 ? Math.min(...averages) : 0).toFixed(2)),
+      max: parseFloat((averages.length > 0 ? Math.max(...averages) : 0).toFixed(2)),
+      count: students.length,
+      studentResults: studentReports.map(r => ({
+        ...r,
+        rank: sortedAverages.indexOf(r.annualAverage) + 1,
       })),
     };
   }
@@ -405,13 +430,10 @@ export class GradesService {
     }, {});
     const s5Report = reportBySemesterName['S5'];
     const s6Report = reportBySemesterName['S6'];
-
-    const annualAverage =
-      s5Report && s6Report
-        ? (s5Report.semesterAverage + s6Report.semesterAverage) / 2
-        : reports.length > 0
-          ? reports.reduce((acc, curr) => acc + curr.semesterAverage, 0) / reports.length
-          : 0;
+    if (!s5Report || !s6Report) {
+      throw new NotFoundException('Le calcul annuel requiert les semestres S5 et S6.');
+    }
+    const annualAverage = (s5Report.semesterAverage + s6Report.semesterAverage) / 2;
 
     let mention = 'Non attribuée';
     if (annualAverage >= 16) mention = 'Très Bien';

@@ -133,10 +133,10 @@ export class ExportsService {
         page.drawText(subj.subject.substring(0, 52), { x: 45, y: currentY - 12, size: 8, font: fontNormal });
         page.drawText(subj.credits?.toString() || '-', { x: cols.credits + 10, y: currentY - 12, size: 8, font: fontNormal });
         page.drawText('3,00', { x: cols.coeff + 10, y: currentY - 12, size: 8, font: fontNormal }); 
-        page.drawText(subj.average.toString(), { x: cols.studentNote + 15, y: currentY - 12, size: 9, font: fontBold });
+        page.drawText(Number(subj.average ?? 0).toFixed(2), { x: cols.studentNote + 15, y: currentY - 12, size: 9, font: fontBold });
         
         const subjStat = globalStats.subjectStats.find(s => s.subjectName === subj.subject);
-        page.drawText(subjStat?.average.toString() || '-', { x: cols.classAvg + 15, y: currentY - 12, size: 8, font: fontNormal });
+        page.drawText(subjStat ? Number(subjStat.average ?? 0).toFixed(2) : '-', { x: cols.classAvg + 15, y: currentY - 12, size: 8, font: fontNormal });
         
         // Vertical lines for subject row
         [cols.credits - 5, cols.coeff - 5, cols.studentNote - 10, cols.classAvg - 5].forEach(x => {
@@ -149,7 +149,7 @@ export class ExportsService {
       page.drawRectangle({ x: 30, y: currentY - 18, width: width - 60, height: 18, color: rgb(0.98, 0.98, 0.98), borderColor: rgb(0,0,0), borderWidth: 0.5 });
       page.drawText(`Moyenne UE ${semester?.name.substring(1) || '0'}-${report.report.indexOf(ue) + 1}`, { x: 130, y: currentY - 13, size: 9, font: fontBold, color: rgb(0, 0, 0.4) });
       page.drawText(ue.creditsExpected.toString(), { x: cols.credits + 10, y: currentY - 13, size: 8, font: fontBold });
-      page.drawText(ue.average.toString(), { x: cols.studentNote + 15, y: currentY - 13, size: 9, font: fontBold, color: rgb(0, 0, 0.4) });
+      page.drawText(Number(ue.average ?? 0).toFixed(2), { x: cols.studentNote + 15, y: currentY - 13, size: 9, font: fontBold, color: rgb(0, 0, 0.4) });
       
       // Vertical lines for footer row
       [cols.credits - 5, cols.coeff - 5, cols.studentNote - 10, cols.classAvg - 5].forEach(x => {
@@ -166,7 +166,7 @@ export class ExportsService {
     page.drawLine({ start: { x: width - 110, y: currentY }, end: { x: width - 110, y: currentY - 25 }, thickness: 1 });
     
     page.drawText(`Moyenne au Semestre ${semester?.name.substring(1) || ''}`, { x: width - 30 - avgBoxWidth + 10, y: currentY - 17, size: 10, font: fontBold, color: rgb(0, 0, 0.4) });
-    page.drawText(report.semesterAverage.toString(), { x: width - 85, y: currentY - 17, size: 11, font: fontBold });
+    page.drawText(Number(report.semesterAverage ?? 0).toFixed(2), { x: width - 85, y: currentY - 17, size: 11, font: fontBold });
 
     // 7. Rank & Mention Grid
     currentY -= 40;
@@ -280,7 +280,7 @@ export class ExportsService {
          // Row for S1
          page.drawRectangle({ x: 40, y: currentY - 15, width: width - 80, height: 15, borderColor: rgb(0,0,0), borderWidth: 0.5 });
          page.drawText('Semestre 1', { x: 70, y: currentY - 11, size: 8, font: fontNormal });
-         page.drawText(ue.average.toString(), { x: cols.notes + 10, y: currentY - 11, size: 8, font: fontBold });
+         page.drawText(Number(ue.average ?? 0).toFixed(2), { x: cols.notes + 10, y: currentY - 11, size: 8, font: fontBold });
          currentY -= 15;
 
          // Find same UE in S2
@@ -288,7 +288,7 @@ export class ExportsService {
          if (ueS2) {
             page.drawRectangle({ x: 40, y: currentY - 15, width: width - 80, height: 15, borderColor: rgb(0,0,0), borderWidth: 0.5 });
             page.drawText('Semestre 2', { x: 70, y: currentY - 11, size: 8, font: fontNormal });
-            page.drawText(ueS2.average.toString(), { x: cols.notes + 10, y: currentY - 11, size: 8, font: fontBold });
+           page.drawText(Number(ueS2.average ?? 0).toFixed(2), { x: cols.notes + 10, y: currentY - 11, size: 8, font: fontBold });
             currentY -= 15;
             
             // Annual Row for this UE
@@ -305,7 +305,7 @@ export class ExportsService {
     currentY -= 30;
     page.drawRectangle({ x: 40, y: currentY - 40, width: width - 80, height: 40, borderColor: rgb(0,0,0), borderWidth: 2 });
     page.drawText('MOYENNE ANNUELLE GENERALE', { x: 60, y: currentY - 25, size: 12, font: fontBold });
-    page.drawText(annualReport.annualAverage.toString(), { x: cols.notes, y: currentY - 25, size: 14, font: fontBold, color: rgb(0, 0, 0.8) });
+    page.drawText(Number(annualReport.annualAverage ?? 0).toFixed(2), { x: cols.notes, y: currentY - 25, size: 14, font: fontBold, color: rgb(0, 0, 0.8) });
     
     page.drawText(`DÉCISION : ${annualReport.status.toUpperCase()}`, { x: 60, y: currentY - 60, size: 11, font: fontBold });
     page.drawText(`MENTION : ${annualReport.mention.toUpperCase()}`, { x: 300, y: currentY - 60, size: 11, font: fontBold });
@@ -404,6 +404,35 @@ export class ExportsService {
           archive.append(pdf, { name: `bulletin_${semester?.name || 'SEM'}_${safeName}.pdf` });
         } catch {
           // ignore missing data
+        }
+      }
+
+      archive.finalize();
+    });
+  }
+
+  async generateAllAnnualBulletinsZip(year: string): Promise<Buffer> {
+    const students = await this.prisma.student.findMany({ orderBy: [{ lastName: 'asc' }] });
+
+    return new Promise<Buffer>(async (resolve, reject) => {
+      const archive = archiver('zip', { zlib: { level: 9 } });
+      const chunks: Buffer[] = [];
+
+      archive.on('data', (d) => chunks.push(Buffer.from(d)));
+      archive.on('warning', (err) => {
+        if ((err as any).code === 'ENOENT') return;
+        reject(err);
+      });
+      archive.on('error', (err) => reject(err));
+      archive.on('end', () => resolve(Buffer.concat(chunks)));
+
+      for (const s of students) {
+        try {
+          const pdf = await this.generateAnnualBulletinPdf(s.id, year);
+          const safeName = `${(s.lastName || '').toUpperCase()}_${(s.firstName || '').toUpperCase()}_${s.studentId || s.id}`.replace(/[^a-zA-Z0-9_]+/g, '_');
+          archive.append(pdf, { name: `bulletin_ANNUEL_${year}_${safeName}.pdf` });
+        } catch {
+          // ignore missing data or errors for individual students
         }
       }
 
