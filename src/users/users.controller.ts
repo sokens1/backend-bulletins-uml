@@ -81,4 +81,11 @@ export class UsersController {
   updateStaff(@Param('id') id: string, @Body() data: any) {
     return this.usersService.updateStaff(id, data);
   }
+
+  @Delete('staff/:id')
+  @Roles(Role.ADMIN)
+  @ApiOperation({ summary: 'Delete a staff member' })
+  deleteStaff(@Param('id') id: string) {
+    return this.usersService.deleteStaff(id);
+  }
 }

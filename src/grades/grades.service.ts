@@ -1,13 +1,14 @@
 import { Injectable, NotFoundException, ForbiddenException } from '@nestjs/common';
 import { DatabaseService } from '../database/database.service';
 import { EnterGradeDto, EnterAttendanceDto } from './dto/grades.dto';
+import { SettingsService } from '../settings/settings.service';
 
 @Injectable()
 export class GradesService {
-  constructor(private prisma: DatabaseService) {}
-  private readonly absencePenaltyPerHour = Number(process.env.ABSENCE_PENALTY_PER_HOUR ?? 0.01);
-  private readonly soutenanceUeCode = process.env.SOUTENANCE_UE_CODE ?? 'UE6-2';
-  private readonly soutenanceRetakeEnabled = (process.env.ENABLE_SOUTENANCE_RETAKE ?? 'true') === 'true';
+  constructor(
+    private prisma: DatabaseService,
+    private settingsService: SettingsService,
+  ) {}
 
   private async findStudent(idOrUserId: string) {
     const student = await this.prisma.student.findFirst({
@@ -137,7 +138,12 @@ export class GradesService {
     return (grade.ccGrade ?? 0) * ccWeight + (grade.examGrade ?? 0) * examWeight;
   }
 
+  private async getRulesSettings() {
+    return this.settingsService.getAcademicRulesSettings();
+  }
+
   async calculateStudentReport(studentId: string, semesterId: string) {
+    const rules = await this.getRulesSettings();
     const student = await this.findStudent(studentId);
     const actualStudentId = student.id;
 
@@ -165,7 +171,7 @@ export class GradesService {
       const subjectReports = ue.subjects.map((subject) => {
         const grade = subject.grades[0];
         const absences = subject.attendances.reduce((acc, curr) => acc + curr.hoursAbsent, 0);
-        const penalty = absences * this.absencePenaltyPerHour;
+        const penalty = absences * rules.absencePenaltyPerHour;
         totalAbsences += absences;
         totalPenalty += penalty;
 
@@ -270,6 +276,7 @@ export class GradesService {
 
   // Raw calculation to avoid recursion
   private async calculateStudentReportRaw(studentId: string, semesterId: string) {
+    const rules = await this.getRulesSettings();
     const ues = await this.prisma.uE.findMany({
       where: { semesterId },
       include: {
@@ -294,7 +301,7 @@ export class GradesService {
         if (!grade) continue;
 
         const absences = subj.attendances.reduce((acc, curr) => acc + curr.hoursAbsent, 0);
-        const penalty = absences * this.absencePenaltyPerHour;
+        const penalty = absences * rules.absencePenaltyPerHour;
         const rawAvg = this.computeSubjectAverage(grade, subj.ccWeight, subj.examWeight);
         const avg = Math.max(0, rawAvg - penalty);
         
@@ -368,14 +375,22 @@ export class GradesService {
       subjectStats,
       studentResults: studentAverages.map(s => ({
         studentId: s.id,
+        student: {
+          id: s.id,
+          firstName: s.firstName,
+          lastName: s.lastName,
+        },
         semesterAverage: parseFloat(s.avg.toFixed(2)),
         // Rank can be determined from sortedAverages
-        rank: sortedAverages.indexOf(s.avg) + 1
+        rank: sortedAverages.indexOf(s.avg) + 1,
+        totalCreditsWon: s.avg >= 10 ? 30 : 0,
+        status: s.avg >= 10 ? 'Semestre validé' : 'Semestre non validé',
       })),
     };
   }
 
   async calculateAnnualReport(studentId: string, year: string) {
+    const rules = await this.getRulesSettings();
     const semesters = await this.prisma.semester.findMany({ where: { year } });
     const student = await this.findStudent(studentId);
     const actualStudentId = student.id;
@@ -410,12 +425,12 @@ export class GradesService {
 
     const soutenanceUe = reports
       .flatMap((r) => r.report ?? [])
-      .find((ue) => ue.ueCode === this.soutenanceUeCode);
+      .find((ue) => ue.ueCode === rules.soutenanceUeCode);
     const soutenanceCredits = soutenanceUe?.creditsExpected ?? 0;
     const soutenanceNotAcquired = soutenanceUe ? soutenanceUe.creditsWon < soutenanceCredits : false;
 
     const canRetakeSoutenance =
-      this.soutenanceRetakeEnabled &&
+      rules.enableSoutenanceRetake &&
       !!soutenanceUe &&
       soutenanceNotAcquired &&
       totalCreditsWon >= totalCreditsExpected - soutenanceCredits;

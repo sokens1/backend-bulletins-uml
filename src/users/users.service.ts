@@ -115,6 +115,17 @@ export class UsersService {
     });
   }
 
+  async deleteStaff(id: string) {
+    const user = await this.prisma.user.findUnique({ where: { id } });
+    if (!user) throw new NotFoundException('User not found');
+
+    if (user.role === 'ADMIN') {
+      throw new ConflictException('Suppression d\'un administrateur non autorisée');
+    }
+
+    return this.prisma.user.delete({ where: { id } });
+  }
+
   async createStudent(data: any) {
     const existingUser = await this.prisma.user.findUnique({ where: { email: data.email } });
     if (existingUser) throw new ConflictException('User with this email already exists');
