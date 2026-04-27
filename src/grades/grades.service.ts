@@ -182,7 +182,7 @@ export class GradesService {
 
     const rules = await this.getRulesSettings();
 
-    const results = [];
+    const results: any[] = [];
     for (const student of students) {
       for (const subject of subjects) {
         const g = grades.find(grade => grade.studentId === student.id && grade.subjectId === subject.id);
