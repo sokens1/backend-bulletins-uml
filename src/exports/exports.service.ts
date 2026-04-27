@@ -122,10 +122,6 @@ export class ExportsService {
       page.drawRectangle({ x: 30, y: currentY - 18, width: width - 60, height: 18, color: rgb(0.97, 0.97, 0.97), borderColor: rgb(0,0,0), borderWidth: 0.5 });
       page.drawText(`UE ${semester?.name.substring(1) || '0'}-${report.report.indexOf(ue) + 1} : ${ue.ueName}`, { x: 35, y: currentY - 13, size: 9, font: fontBold, color: rgb(0, 0, 0.4) });
       
-      // Vertical lines for UE row
-      [cols.credits - 5, cols.coeff - 5, cols.studentNote - 10, cols.classAvg - 5].forEach(x => {
-        page.drawLine({ start: { x, y: currentY }, end: { x, y: currentY - 18 }, thickness: 0.5 });
-      });
       currentY -= 18;
 
       for (const subj of ue.subjects) {
