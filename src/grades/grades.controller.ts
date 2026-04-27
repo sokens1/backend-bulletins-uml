@@ -75,4 +75,18 @@ export class GradesController {
   getAnnualStats(@Query('year') year: string) {
     return this.gradesService.getAnnualPromotionStats(year);
   }
+
+  @Get('subject/:subjectId')
+  @Roles(Role.ADMIN, Role.TEACHER, Role.SECRETARY)
+  @ApiOperation({ summary: 'Get all student grades for a specific subject' })
+  getSubjectGrades(@Param('subjectId') subjectId: string, @Request() req) {
+    return this.gradesService.getSubjectGrades(subjectId, req.user.id);
+  }
+
+  @Get('semester-all/:semesterId')
+  @Roles(Role.ADMIN, Role.TEACHER, Role.SECRETARY)
+  @ApiOperation({ summary: 'Get all student grades for all subjects in a semester' })
+  getSemesterGrades(@Param('semesterId') semesterId: string, @Request() req) {
+    return this.gradesService.getSemesterGrades(semesterId, req.user.id);
+  }
 }

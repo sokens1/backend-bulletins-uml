@@ -104,6 +104,119 @@ export class GradesService {
     });
   }
 
+  async getSubjectGrades(subjectId: string, userId: string) {
+    const subject = await this.prisma.subject.findUnique({ where: { id: subjectId } });
+    if (!subject) throw new NotFoundException('Subject not found');
+
+    const user = await this.prisma.user.findUnique({ where: { id: userId } });
+    if (user?.role === 'TEACHER') {
+      const teacher = await this.prisma.teacher.findUnique({ where: { userId } });
+      if (!teacher || subject.teacherId !== teacher.id) {
+        throw new ForbiddenException('Vous n\'êtes pas autorisé à consulter les notes de cette matière.');
+      }
+    }
+
+    const students = await this.prisma.student.findMany({
+      orderBy: { lastName: 'asc' },
+    });
+
+    const grades = await this.prisma.grade.findMany({
+      where: { subjectId },
+    });
+
+    const attendances = await this.prisma.attendance.findMany({
+      where: { subjectId },
+    });
+
+    const rules = await this.getRulesSettings();
+
+    return students.map(s => {
+      const g = grades.find(grade => grade.studentId === s.id);
+      const studentAttendances = attendances.filter(a => a.studentId === s.id);
+      const totalAbsences = studentAttendances.reduce((acc, curr) => acc + curr.hoursAbsent, 0);
+      
+      let average = 0;
+      if (g) {
+        average = this.computeSubjectAverage(
+          g,
+          subject.ccWeight ?? 0.4,
+          subject.examWeight ?? 0.6,
+          totalAbsences,
+          rules.absencePenaltyPerHour
+        );
+      }
+
+      return {
+        student: s,
+        grade: g || null,
+        absences: totalAbsences,
+        average: parseFloat(average.toFixed(2)),
+      };
+    });
+  }
+
+  async getSemesterGrades(semesterId: string, userId: string) {
+    const user = await this.prisma.user.findUnique({ where: { id: userId }, include: { teacher: true } });
+    
+    const subjects = await this.prisma.subject.findMany({
+      where: {
+        ue: { semesterId },
+        ...(user?.role === 'TEACHER' ? { teacherId: user.teacher?.id } : {}),
+      },
+      include: { ue: true },
+    });
+
+    const grades = await this.prisma.grade.findMany({
+      where: {
+        subjectId: { in: subjects.map(s => s.id) },
+      },
+    });
+
+    const attendances = await this.prisma.attendance.findMany({
+       where: { subjectId: { in: subjects.map(s => s.id) } }
+    });
+
+    const students = await this.prisma.student.findMany({
+      orderBy: { lastName: 'asc' },
+    });
+
+    const rules = await this.getRulesSettings();
+
+    const results = [];
+    for (const student of students) {
+      for (const subject of subjects) {
+        const g = grades.find(grade => grade.studentId === student.id && grade.subjectId === subject.id);
+        const studentAttendances = attendances.filter(a => a.studentId === student.id && a.subjectId === subject.id);
+        const totalAbsences = studentAttendances.reduce((acc, curr) => acc + curr.hoursAbsent, 0);
+        
+        let average = 0;
+        if (g) {
+          average = this.computeSubjectAverage(
+            g,
+            subject.ccWeight ?? 0.4,
+            subject.examWeight ?? 0.6,
+            totalAbsences,
+            rules.absencePenaltyPerHour
+          );
+        }
+
+        results.push({
+          student,
+          subject: {
+            id: subject.id,
+            name: subject.name,
+            ueName: subject.ue.name,
+          },
+          grade: g || null,
+          absences: totalAbsences,
+          average: parseFloat(average.toFixed(2)),
+        });
+      }
+    }
+
+    return results;
+  }
+
   async enterAttendance(dto: EnterAttendanceDto, userId: string) {
     const student = await this.findStudent(dto.studentId);
     
@@ -267,6 +380,11 @@ export class GradesService {
 
     if (!studentWithUser) throw new NotFoundException('Student profile not found');
 
+    const hasCompensatedUE = finalReport.some(ue => ue.average < 10 && ue.creditsWon > 0);
+    const semesterStatus = isSemesterValidated 
+      ? (hasCompensatedUE ? 'Semestre validé par compensation' : 'Semestre validé') 
+      : 'Semestre non validé';
+
     return {
       student: studentWithUser,
       semesterId,
@@ -276,7 +394,7 @@ export class GradesService {
       totalCreditsExpected: totalSemesterCredits,
       rank: rankData.rank,
       totalStudents: rankData.total,
-      status: isSemesterValidated ? 'Semestre validé' : 'Semestre non validé',
+      status: semesterStatus,
     };
   }
 
@@ -399,18 +517,22 @@ export class GradesService {
       max: parseFloat((averages.length > 0 ? Math.max(...averages) : 0).toFixed(2)),
       count: students.length,
       subjectStats,
-      studentResults: studentAverages.map(s => ({
-        studentId: s.id,
-        student: {
-          id: s.id,
-          firstName: s.firstName,
-          lastName: s.lastName,
-        },
-        semesterAverage: parseFloat(s.avg.toFixed(2)),
-        // Rank can be determined from sortedAverages
-        rank: sortedAverages.indexOf(s.avg) + 1,
-        totalCreditsWon: s.avg >= 10 ? 30 : 0,
-        status: s.avg >= 10 ? 'Semestre validé' : 'Semestre non validé',
+      studentResults: await Promise.all(studentAverages.map(async (s) => {
+        // We calculate the full report but we'll optimize calculateStudentReport later if needed.
+        // For now, let's just make sure it's correct.
+        const report = await this.calculateStudentReport(s.id, semesterId);
+        return {
+          studentId: s.id,
+          student: {
+            id: s.id,
+            firstName: s.firstName,
+            lastName: s.lastName,
+          },
+          semesterAverage: report.semesterAverage,
+          rank: report.rank,
+          totalCreditsWon: report.totalCreditsWon,
+          status: report.status,
+        };
       })),
     };
   }
@@ -504,6 +626,11 @@ export class GradesService {
       juryDecision = 'Reprise de soutenance';
     }
 
+    const hasCompensatedSemester = reports.some(r => r.semesterAverage < 10);
+    const annualStatus = annualAverage >= 10 
+      ? (hasCompensatedSemester ? 'Admis(e) par compensation' : 'Admis(e)')
+      : 'Ajourné(e)';
+
     return {
       student,
       year,
@@ -511,7 +638,7 @@ export class GradesService {
       semesterReports: reports,
       totalCreditsWon,
       totalCreditsExpected,
-      status: annualAverage >= 10 ? 'Admis(e)' : 'Ajourné(e)',
+      status: annualStatus,
       juryDecision,
       mention,
     };
