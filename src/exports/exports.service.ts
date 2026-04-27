@@ -491,6 +491,8 @@ export class ExportsService {
       students.map((s) => this.gradesService.calculateAnnualReport(s.id, year))
     );
 
+    const sortedAverages = [...reports.map(r => r.annualAverage)].sort((a, b) => b - a);
+
     const workbook = new ExcelJS.Workbook();
     const worksheet = workbook.addWorksheet(`Promotion Annuelle - ${year}`);
 
@@ -517,13 +519,14 @@ export class ExportsService {
     worksheet.columns = columns;
 
     reports.forEach((report) => {
+      const rank = sortedAverages.indexOf(report.annualAverage) + 1;
       const rowData: any = {
         studentId: report.student?.studentId || '',
         lastName: report.student?.lastName || '',
         firstName: report.student?.firstName || '',
         class: report.student?.class || '',
         annualAvg: report.annualAverage?.toFixed(2) || '0.00',
-        rank: report.rank || '',
+        rank: rank,
         credits: report.totalCreditsWon || 0,
         status: report.status || '',
         mention: report.mention || '',
