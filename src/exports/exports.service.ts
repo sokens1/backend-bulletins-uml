@@ -133,10 +133,10 @@ export class ExportsService {
         page.drawText(subj.subject.substring(0, 52), { x: 45, y: currentY - 12, size: 8, font: fontNormal });
         page.drawText(subj.credits?.toString() || '-', { x: cols.credits + 10, y: currentY - 12, size: 8, font: fontNormal });
         page.drawText('3,00', { x: cols.coeff + 10, y: currentY - 12, size: 8, font: fontNormal }); 
-        page.drawText(Number(subj.average ?? 0).toFixed(2), { x: cols.studentNote + 15, y: currentY - 12, size: 9, font: fontBold });
+        page.drawText(Number(subj.average ?? 0).toFixed(2).replace('.', ','), { x: cols.studentNote + 15, y: currentY - 12, size: 9, font: fontBold });
         
         const subjStat = globalStats.subjectStats.find(s => s.subjectName === subj.subject);
-        page.drawText(subjStat ? Number(subjStat.average ?? 0).toFixed(2) : '-', { x: cols.classAvg + 15, y: currentY - 12, size: 8, font: fontNormal });
+        page.drawText(subjStat ? Number(subjStat.average ?? 0).toFixed(2).replace('.', ',') : '-', { x: cols.classAvg + 15, y: currentY - 12, size: 8, font: fontNormal });
         
         // Vertical lines for subject row
         [cols.credits - 5, cols.coeff - 5, cols.studentNote - 10, cols.classAvg - 5].forEach(x => {
@@ -149,7 +149,7 @@ export class ExportsService {
       page.drawRectangle({ x: 30, y: currentY - 18, width: width - 60, height: 18, color: rgb(0.98, 0.98, 0.98), borderColor: rgb(0,0,0), borderWidth: 0.5 });
       page.drawText(`Moyenne UE ${semester?.name.substring(1) || '0'}-${report.report.indexOf(ue) + 1}`, { x: 130, y: currentY - 13, size: 9, font: fontBold, color: rgb(0, 0, 0.4) });
       page.drawText(ue.creditsExpected.toString(), { x: cols.credits + 10, y: currentY - 13, size: 8, font: fontBold });
-      page.drawText(Number(ue.average ?? 0).toFixed(2), { x: cols.studentNote + 15, y: currentY - 13, size: 9, font: fontBold, color: rgb(0, 0, 0.4) });
+      page.drawText(Number(ue.average ?? 0).toFixed(2).replace('.', ','), { x: cols.studentNote + 15, y: currentY - 13, size: 9, font: fontBold, color: rgb(0, 0, 0.4) });
       
       // Vertical lines for footer row
       [cols.credits - 5, cols.coeff - 5, cols.studentNote - 10, cols.classAvg - 5].forEach(x => {
@@ -166,7 +166,7 @@ export class ExportsService {
     page.drawLine({ start: { x: width - 110, y: currentY }, end: { x: width - 110, y: currentY - 25 }, thickness: 1 });
     
     page.drawText(`Moyenne au Semestre ${semester?.name.substring(1) || ''}`, { x: width - 30 - avgBoxWidth + 10, y: currentY - 17, size: 10, font: fontBold, color: rgb(0, 0, 0.4) });
-    page.drawText(Number(report.semesterAverage ?? 0).toFixed(2), { x: width - 85, y: currentY - 17, size: 11, font: fontBold });
+    page.drawText(Number(report.semesterAverage ?? 0).toFixed(2).replace('.', ','), { x: width - 85, y: currentY - 17, size: 11, font: fontBold });
 
     // 7. Rank & Mention Grid
     currentY -= 40;
@@ -189,33 +189,43 @@ export class ExportsService {
     page.drawText(validationTitle, { x: width / 2 - fontBold.widthOfTextAtSize(validationTitle, 9) / 2, y: currentY, size: 9, font: fontBold });
     currentY -= 15;
     
-    const valColWidth = (width - 60) / 3;
+    const numUEs = Math.min(report.report.length, 2);
+    const numColumns = numUEs + 1; // UEs + 1 for the total
+    const valColWidth = (width - 60) / numColumns;
+    
     page.drawRectangle({ x: 30, y: currentY - 45, width: width - 60, height: 45, borderColor: rgb(0,0,0), borderWidth: 1 });
-    page.drawLine({ start: { x: 30 + valColWidth, y: currentY }, end: { x: 30 + valColWidth, y: currentY - 45 }, thickness: 1 });
-    page.drawLine({ start: { x: 30 + valColWidth * 2, y: currentY }, end: { x: 30 + valColWidth * 2, y: currentY - 45 }, thickness: 1 });
+    for (let i = 1; i < numColumns; i++) {
+      page.drawLine({ start: { x: 30 + valColWidth * i, y: currentY }, end: { x: 30 + valColWidth * i, y: currentY - 45 }, thickness: 1 });
+    }
 
     // Fill headers logic for UEs
-    report.report.slice(0, 2).forEach((ue, idx) => {
+    report.report.slice(0, numUEs).forEach((ue, idx) => {
       const startX = 30 + (valColWidth * idx);
       page.drawText(`UE ${semester?.name.substring(1) || '0'}-${idx + 1}`, { x: startX + 5, y: currentY - 12, size: 8, font: fontBold });
       page.drawText(`${ue.creditsWon} Crédits / ${ue.creditsExpected}`, { x: startX + 5, y: currentY - 25, size: 8, font: fontNormal });
       page.drawText(ue.status, { x: startX + 5, y: currentY - 38, size: 8, font: fontItalic });
     });
 
-    const totalColumnX = 30 + valColWidth * 2;
+    const totalColumnX = 30 + valColWidth * numUEs;
     page.drawText('Crédits Acquis au Semestre', { x: totalColumnX + 5, y: currentY - 12, size: 8, font: fontBold });
     page.drawText(`${report.totalCreditsWon} Crédits / 30`, { x: totalColumnX + 5, y: currentY - 25, size: 8, font: fontNormal });
     page.drawText(report.status.toUpperCase(), { x: totalColumnX + 5, y: currentY - 38, size: 8, font: fontBold, color: report.semesterAverage >= 10 ? rgb(0, 0.4, 0) : rgb(0.7, 0, 0) });
 
     // 9. Final Footer Blocks
     currentY -= 80;
-    page.drawText(`Décision du Jury :    ${report.semesterAverage.toFixed(2)}`, { x: 60, y: currentY, size: 10, font: fontBold, color: rgb(0, 0, 0.4) });
+    page.drawText(`Décision du Jury :    ${report.semesterAverage.toFixed(2).replace('.', ',')}`, { x: 60, y: currentY, size: 10, font: fontBold, color: rgb(0, 0, 0.4) });
     page.drawLine({ start: { x: 160, y: currentY - 2 }, end: { x: 535, y: currentY - 2 }, thickness: 0.5, color: rgb(0, 0, 0.4) });
 
     currentY -= 40;
     page.drawText(`Fait à Libreville, le ${new Date().toLocaleDateString('fr-FR')}`, { x: width / 2 - 50, y: currentY, size: 10, font: fontBold });
     currentY -= 20;
     page.drawText('LE DIRECTEUR DES ETUDES ET DE LA PEDAGOGIE', { x: width / 2 - 120, y: currentY, size: 11, font: fontBold, color: rgb(0, 0, 0.4) });
+
+    currentY -= 30;
+    page.drawText('Davy Edgard MOUSSAVOU', { x: width / 2 - 75, y: currentY, size: 11, font: fontBold, color: rgb(0, 0, 0.6) });
+
+    const disclaimer = "Il ne sera délivré qu'un seul et unique exemplaire de bulletins de notes. L'étudiant est donc prié d'en faire plusieurs copies légalisées.";
+    page.drawText(disclaimer, { x: width / 2 - fontItalic.widthOfTextAtSize(disclaimer, 8) / 2, y: 30, size: 8, font: fontItalic });
 
     const pdfBytes = await pdfDoc.save();
     return Buffer.from(pdfBytes);
