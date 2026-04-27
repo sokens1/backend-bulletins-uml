@@ -1,5 +1,6 @@
-import { Controller, Get, Post, Param, Query, Res, UseInterceptors, UploadedFile, UseGuards, Request } from '@nestjs/common';
+import { Controller, Get, Post, Param, Query, Res, UseInterceptors, UploadedFile, UseGuards, Request, ForbiddenException } from '@nestjs/common';
 import { ExportsService } from './exports.service';
+import { DatabaseService } from '../database/database.service';
 import type { Response } from 'express';
 import { FileInterceptor } from '@nestjs/platform-express';
 import { ApiTags, ApiOperation, ApiBearerAuth, ApiConsumes, ApiBody } from '@nestjs/swagger';
@@ -13,7 +14,10 @@ import { Role } from '@prisma/client';
 @Controller('exports')
 @UseGuards(JwtAuthGuard, RolesGuard)
 export class ExportsController {
-  constructor(private readonly exportsService: ExportsService) {}
+  constructor(
+    private readonly exportsService: ExportsService,
+    private readonly prisma: DatabaseService
+  ) {}
 
   @Get('bulletin/:studentId')
   @ApiOperation({ summary: 'Download student bulletin in PDF format' })
@@ -21,7 +25,15 @@ export class ExportsController {
     @Param('studentId') studentId: string,
     @Query('semesterId') semesterId: string,
     @Res() res: Response,
+    @Request() req,
   ) {
+    if (req.user?.role === 'STUDENT') {
+      const semester = await this.prisma.semester.findUnique({ where: { id: semesterId } });
+      if (semester?.isLocked) {
+        throw new ForbiddenException('Le téléchargement des bulletins est fermé pour ce semestre.');
+      }
+    }
+
     const buffer: Buffer = await this.exportsService.generateBulletinPdf(studentId, semesterId);
     
     res.set({
@@ -39,7 +51,17 @@ export class ExportsController {
     @Param('studentId') studentId: string,
     @Query('year') year: string,
     @Res() res: Response,
+    @Request() req,
   ) {
+    if (req.user?.role === 'STUDENT') {
+      // Pour le bulletin annuel, vérifier s'il y a un semestre verrouillé dans l'année ?
+      // Le plus strict est de vérifier si n'importe quel semestre de l'année est verrouillé.
+      const semesters = await this.prisma.semester.findMany({ where: { year } });
+      if (semesters.some(s => s.isLocked)) {
+        throw new ForbiddenException('Le téléchargement des bulletins annuels est fermé.');
+      }
+    }
+
     const buffer: Buffer = await this.exportsService.generateAnnualBulletinPdf(studentId, year);
     
     res.set({
@@ -62,6 +84,22 @@ export class ExportsController {
     res.set({
       'Content-Type': 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
       'Content-Disposition': `attachment; filename=promotion_${semesterId}.xlsx`,
+      'Content-Length': buffer.length,
+    });
+    res.end(buffer);
+  }
+
+  @Get('promotion-annual')
+  @Roles(Role.ADMIN, Role.SECRETARY)
+  @ApiOperation({ summary: 'Download annual promotion export in XLSX' })
+  async downloadAnnualPromotionXlsx(
+    @Query('year') year: string,
+    @Res() res: Response,
+  ) {
+    const buffer = await this.exportsService.generateAnnualPromotionXlsx(year);
+    res.set({
+      'Content-Type': 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
+      'Content-Disposition': `attachment; filename=promotion_annuelle_${year.replace(/\s+/g, '_')}.xlsx`,
       'Content-Length': buffer.length,
     });
     res.end(buffer);

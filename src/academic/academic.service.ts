@@ -25,6 +25,15 @@ export class AcademicService {
     });
   }
 
+  async toggleSemesterLock(id: string) {
+    const semester = await this.prisma.semester.findUnique({ where: { id } });
+    if (!semester) throw new NotFoundException('Semester not found');
+    return this.prisma.semester.update({
+      where: { id },
+      data: { isLocked: !semester.isLocked },
+    });
+  }
+
   // UEs
   async createUE(dto: CreateUEDto) {
     const semester = await this.prisma.semester.findUnique({

@@ -102,15 +102,16 @@ export class ExportsService {
     const tableHeaderY = currentY;
     page.drawRectangle({ x: 30, y: tableHeaderY - 20, width: width - 60, height: 20, color: rgb(0.95, 0.95, 1), borderColor: rgb(0,0,0), borderWidth: 1 });
     
-    const cols = { matiere: 35, credits: 310, coeff: 365, studentNote: 425, classAvg: 505 };
+    const cols = { matiere: 35, credits: 280, coeff: 325, absences: 370, studentNote: 425, classAvg: 505 };
     page.drawText('Matière', { x: cols.matiere, y: tableHeaderY - 13, size: 9, font: fontBold });
     page.drawText('Crédits', { x: cols.credits, y: tableHeaderY - 13, size: 8, font: fontBold });
     page.drawText('Coefficients', { x: cols.coeff, y: tableHeaderY - 13, size: 7, font: fontBold });
+    page.drawText('Hrs Abs.', { x: cols.absences, y: tableHeaderY - 13, size: 8, font: fontBold });
     page.drawText("Notes de l'étudiant", { x: cols.studentNote - 5, y: tableHeaderY - 13, size: 8, font: fontBold, color: rgb(0, 0, 0.4) });
     page.drawText('Moy. classe', { x: cols.classAvg, y: tableHeaderY - 13, size: 8, font: fontBold });
 
     // Vertical lines for header
-    [cols.credits - 5, cols.coeff - 5, cols.studentNote - 10, cols.classAvg - 5].forEach(x => {
+    [cols.credits - 5, cols.coeff - 5, cols.absences - 5, cols.studentNote - 10, cols.classAvg - 5].forEach(x => {
       page.drawLine({ start: { x, y: tableHeaderY }, end: { x, y: tableHeaderY - 20 }, thickness: 1 });
     });
 
@@ -126,16 +127,17 @@ export class ExportsService {
 
       for (const subj of ue.subjects) {
         page.drawRectangle({ x: 30, y: currentY - 18, width: width - 60, height: 18, borderColor: rgb(0,0,0), borderWidth: 0.5 });
-        page.drawText(subj.subject.substring(0, 52), { x: 45, y: currentY - 12, size: 8, font: fontNormal });
+        page.drawText(subj.subject.substring(0, 48), { x: 35, y: currentY - 12, size: 8, font: fontNormal });
         page.drawText(subj.credits?.toString() || '-', { x: cols.credits + 10, y: currentY - 12, size: 8, font: fontNormal });
         page.drawText('3,00', { x: cols.coeff + 10, y: currentY - 12, size: 8, font: fontNormal }); 
+        page.drawText(subj.absences > 0 ? subj.absences.toString() : '-', { x: cols.absences + 10, y: currentY - 12, size: 8, font: fontNormal, color: subj.absences > 0 ? rgb(0.8, 0, 0) : rgb(0,0,0) });
         page.drawText(Number(subj.average ?? 0).toFixed(2).replace('.', ','), { x: cols.studentNote + 15, y: currentY - 12, size: 9, font: fontBold });
         
         const subjStat = globalStats.subjectStats.find(s => s.subjectName === subj.subject);
         page.drawText(subjStat ? Number(subjStat.average ?? 0).toFixed(2).replace('.', ',') : '-', { x: cols.classAvg + 15, y: currentY - 12, size: 8, font: fontNormal });
         
         // Vertical lines for subject row
-        [cols.credits - 5, cols.coeff - 5, cols.studentNote - 10, cols.classAvg - 5].forEach(x => {
+        [cols.credits - 5, cols.coeff - 5, cols.absences - 5, cols.studentNote - 10, cols.classAvg - 5].forEach(x => {
           page.drawLine({ start: { x, y: currentY }, end: { x, y: currentY - 18 }, thickness: 0.5 });
         });
         currentY -= 18;
@@ -145,10 +147,14 @@ export class ExportsService {
       page.drawRectangle({ x: 30, y: currentY - 18, width: width - 60, height: 18, color: rgb(0.98, 0.98, 0.98), borderColor: rgb(0,0,0), borderWidth: 0.5 });
       page.drawText(`Moyenne UE ${semester?.name.substring(1) || '0'}-${report.report.indexOf(ue) + 1}`, { x: 130, y: currentY - 13, size: 9, font: fontBold, color: rgb(0, 0, 0.4) });
       page.drawText(ue.creditsExpected.toString(), { x: cols.credits + 10, y: currentY - 13, size: 8, font: fontBold });
+      
+      const totalUEAbsences = ue.subjects.reduce((sum, s) => sum + (s.absences || 0), 0);
+      page.drawText(totalUEAbsences > 0 ? totalUEAbsences.toString() : '-', { x: cols.absences + 10, y: currentY - 13, size: 8, font: fontBold, color: totalUEAbsences > 0 ? rgb(0.8, 0, 0) : rgb(0,0,0) });
+
       page.drawText(Number(ue.average ?? 0).toFixed(2).replace('.', ','), { x: cols.studentNote + 15, y: currentY - 13, size: 9, font: fontBold, color: rgb(0, 0, 0.4) });
       
       // Vertical lines for footer row
-      [cols.credits - 5, cols.coeff - 5, cols.studentNote - 10, cols.classAvg - 5].forEach(x => {
+      [cols.credits - 5, cols.coeff - 5, cols.absences - 5, cols.studentNote - 10, cols.classAvg - 5].forEach(x => {
         page.drawLine({ start: { x, y: currentY }, end: { x, y: currentY - 18 }, thickness: 0.5 });
       });
       currentY -= 18;
@@ -359,35 +365,187 @@ export class ExportsService {
   }
 
   async generatePromotionXlsx(semesterId: string): Promise<Buffer> {
-    const stats = await this.gradesService.getPromotionStats(semesterId);
-    const workbook = new ExcelJS.Workbook();
-    const worksheet = workbook.addWorksheet('Promotion');
+    const semester = await this.prisma.semester.findUnique({
+      where: { id: semesterId },
+      include: {
+        ues: {
+          include: {
+            subjects: {
+              orderBy: { name: 'asc' },
+            },
+          },
+          orderBy: { name: 'asc' },
+        },
+      },
+    });
 
-    worksheet.columns = [
-      { header: 'NOM', key: 'lastName', width: 22 },
-      { header: 'PRÉNOM', key: 'firstName', width: 22 },
-      { header: 'RANG', key: 'rank', width: 10 },
-      { header: 'CRÉDITS_ACQUIS', key: 'credits', width: 15 },
-      { header: 'MOYENNE_SEMESTRE', key: 'avg', width: 18 },
-      { header: 'DÉCISION', key: 'status', width: 18 },
+    if (!semester) throw new NotFoundException('Semestre introuvable');
+
+    const students = await this.prisma.student.findMany({
+      orderBy: { lastName: 'asc' },
+    });
+
+    const reports = await Promise.all(
+      students.map((s) => this.gradesService.calculateStudentReport(s.id, semesterId))
+    );
+
+    const workbook = new ExcelJS.Workbook();
+    const worksheet = workbook.addWorksheet(`Promotion - ${semester.name}`);
+
+    // Build columns
+    const columns: any[] = [
+      { header: 'MATRICULE', key: 'studentId', width: 20 },
+      { header: 'NOM', key: 'lastName', width: 25 },
+      { header: 'PRÉNOM', key: 'firstName', width: 25 },
+      { header: 'CLASSE', key: 'class', width: 15 },
     ];
 
-    (stats.studentResults || []).forEach((r: any) => {
-      worksheet.addRow({
-        lastName: r.student?.lastName || '',
-        firstName: r.student?.firstName || '',
-        rank: r.rank ?? '',
-        credits: r.totalCreditsWon ?? '',
-        avg: r.semesterAverage ?? '',
-        status: r.status ?? '',
+    // Add UE and Subject columns
+    semester.ues.forEach((ue) => {
+      columns.push({ header: `UE: ${ue.code || ue.name} (MOY)`, key: `ue_${ue.id}_avg`, width: 15 });
+      ue.subjects.forEach((subj) => {
+        columns.push({ header: `${subj.name} (CC)`, key: `subj_${subj.id}_cc`, width: 12 });
+        columns.push({ header: `${subj.name} (EXAM)`, key: `subj_${subj.id}_exam`, width: 12 });
+        columns.push({ header: `${subj.name} (MOY)`, key: `subj_${subj.id}_moy`, width: 12 });
+        columns.push({ header: `${subj.name} (ABS)`, key: `subj_${subj.id}_abs`, width: 10 });
       });
     });
 
+    columns.push(
+      { header: 'MOYENNE SEMESTRE', key: 'semesterAvg', width: 20 },
+      { header: 'RANG', key: 'rank', width: 10 },
+      { header: 'CRÉDITS ACQUIS', key: 'credits', width: 15 },
+      { header: 'DÉCISION', key: 'status', width: 20 }
+    );
+
+    worksheet.columns = columns;
+
+    // Add rows
+    reports.forEach((report) => {
+      const rowData: any = {
+        studentId: report.student?.studentId || '',
+        lastName: report.student?.lastName || '',
+        firstName: report.student?.firstName || '',
+        class: report.student?.class || '',
+        semesterAvg: report.semesterAverage?.toFixed(2) || '0.00',
+        rank: report.rank || '',
+        credits: report.totalCreditsWon || 0,
+        status: report.status || '',
+      };
+
+      report.report.forEach((ueReport: any) => {
+        // Find corresponding UE in semester object to get ID
+        const ue = semester.ues.find(u => u.name === ueReport.ueName || u.code === ueReport.ueCode);
+        if (ue) {
+          rowData[`ue_${ue.id}_avg`] = ueReport.average?.toFixed(2) || '0.00';
+          
+          ueReport.subjects.forEach((subjReport: any) => {
+            const subj = ue.subjects.find(s => s.name === subjReport.subject);
+            if (subj) {
+              rowData[`subj_${subj.id}_cc`] = subjReport.grade?.ccGrade ?? '';
+              rowData[`subj_${subj.id}_exam`] = subjReport.grade?.examGrade ?? '';
+              rowData[`subj_${subj.id}_moy`] = subjReport.average?.toFixed(2) || '0.00';
+              rowData[`subj_${subj.id}_abs`] = subjReport.absences || 0;
+            }
+          });
+        }
+      });
+
+      worksheet.addRow(rowData);
+    });
+
+    // Styling
     worksheet.getRow(1).font = { bold: true };
+    worksheet.getRow(1).fill = {
+      type: 'pattern',
+      pattern: 'solid',
+      fgColor: { argb: 'FFE0E0E0' }
+    };
+    
+    // Add borders to all cells
+    worksheet.eachRow((row) => {
+      row.eachCell((cell) => {
+        cell.border = {
+          top: { style: 'thin' },
+          left: { style: 'thin' },
+          bottom: { style: 'thin' },
+          right: { style: 'thin' }
+        };
+      });
+    });
+
     const buffer = await workbook.xlsx.writeBuffer();
     return Buffer.from(buffer);
   }
+  async generateAnnualPromotionXlsx(year: string): Promise<Buffer> {
+    const semesters = await this.prisma.semester.findMany({
+      where: { year },
+      orderBy: { name: 'asc' },
+    });
 
+    const students = await this.prisma.student.findMany({
+      orderBy: { lastName: 'asc' },
+    });
+
+    const reports = await Promise.all(
+      students.map((s) => this.gradesService.calculateAnnualReport(s.id, year))
+    );
+
+    const workbook = new ExcelJS.Workbook();
+    const worksheet = workbook.addWorksheet(`Promotion Annuelle - ${year}`);
+
+    // Build columns
+    const columns: any[] = [
+      { header: 'MATRICULE', key: 'studentId', width: 20 },
+      { header: 'NOM', key: 'lastName', width: 25 },
+      { header: 'PRÉNOM', key: 'firstName', width: 25 },
+      { header: 'CLASSE', key: 'class', width: 15 },
+    ];
+
+    semesters.forEach((sem) => {
+      columns.push({ header: `MOYENNE ${sem.name}`, key: `sem_${sem.id}_avg`, width: 15 });
+    });
+
+    columns.push(
+      { header: 'MOYENNE ANNUELLE', key: 'annualAvg', width: 20 },
+      { header: 'RANG', key: 'rank', width: 10 },
+      { header: 'CRÉDITS ACQUIS', key: 'credits', width: 15 },
+      { header: 'DÉCISION', key: 'status', width: 20 },
+      { header: 'MENTION', key: 'mention', width: 15 }
+    );
+
+    worksheet.columns = columns;
+
+    reports.forEach((report) => {
+      const rowData: any = {
+        studentId: report.student?.studentId || '',
+        lastName: report.student?.lastName || '',
+        firstName: report.student?.firstName || '',
+        class: report.student?.class || '',
+        annualAvg: report.annualAverage?.toFixed(2) || '0.00',
+        rank: report.rank || '',
+        credits: report.totalCreditsWon || 0,
+        status: report.status || '',
+        mention: report.mention || '',
+      };
+
+      report.semesterReports.forEach((semReport) => {
+        rowData[`sem_${semReport.semesterId}_avg`] = semReport.semesterAverage?.toFixed(2) || '0.00';
+      });
+
+      worksheet.addRow(rowData);
+    });
+
+    worksheet.getRow(1).font = { bold: true };
+    worksheet.getRow(1).fill = {
+      type: 'pattern',
+      pattern: 'solid',
+      fgColor: { argb: 'FFE0E0E0' }
+    };
+
+    const buffer = await workbook.xlsx.writeBuffer();
+    return Buffer.from(buffer);
+  }
   async generateGradesXlsx(semesterId: string): Promise<Buffer> {
     const workbook = new ExcelJS.Workbook();
     const worksheet = workbook.addWorksheet('Notes');

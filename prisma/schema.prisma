@@ -61,6 +61,7 @@ model Semester {
   name      String   // e.g. "S5", "S6"
   year      String   // e.g. "2024-2025"
   isActive  Boolean  @default(false)
+  isLocked  Boolean  @default(false) // If true, only ADMIN can modify grades/attendances
 
   ues       UE[]
 }

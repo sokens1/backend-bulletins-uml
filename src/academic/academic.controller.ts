@@ -21,6 +21,13 @@ export class AcademicController {
     return this.academicService.createSemester(dto);
   }
 
+  @Patch('semester/:id/lock')
+  @Roles(Role.ADMIN)
+  @ApiOperation({ summary: 'Toggle lock status for a semester (Admin only)' })
+  toggleSemesterLock(@Param('id') id: string) {
+    return this.academicService.toggleSemesterLock(id);
+  }
+
   @Post('ue')
   @Roles(Role.ADMIN)
   @ApiOperation({ summary: 'Create a new Teaching Unit (UE) (Admin only)' })

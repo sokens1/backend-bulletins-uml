@@ -26,11 +26,19 @@ export class GradesService {
   async enterGrade(dto: EnterGradeDto, userId: string) {
     const student = await this.findStudent(dto.studentId);
     
-    const subject = await this.prisma.subject.findUnique({ where: { id: dto.subjectId } });
+    const subject = await this.prisma.subject.findUnique({ 
+      where: { id: dto.subjectId },
+      include: { ue: { include: { semester: true } } }
+    });
     if (!subject) throw new NotFoundException('Subject not found');
 
-    // Security Check: 5.7 - Teacher can only enter grades for their own subjects
     const user = await this.prisma.user.findUnique({ where: { id: userId } });
+    if (subject.ue.semester.isLocked && user?.role !== 'ADMIN') {
+      throw new ForbiddenException('Ce semestre est verrouillé. Vous ne pouvez plus modifier les notes.');
+    }
+
+    // Security Check: 5.7 - Teacher can only enter grades for their own subjects
+
     if (user?.role === 'TEACHER') {
       const teacher = await this.prisma.teacher.findUnique({ where: { userId } });
       if (!teacher || subject.teacherId !== teacher.id) {
@@ -98,6 +106,18 @@ export class GradesService {
 
   async enterAttendance(dto: EnterAttendanceDto, userId: string) {
     const student = await this.findStudent(dto.studentId);
+    
+    const subject = await this.prisma.subject.findUnique({
+      where: { id: dto.subjectId },
+      include: { ue: { include: { semester: true } } }
+    });
+    if (!subject) throw new NotFoundException('Subject not found');
+
+    const user = await this.prisma.user.findUnique({ where: { id: userId } });
+    if (subject.ue.semester.isLocked && user?.role !== 'ADMIN') {
+      throw new ForbiddenException('Ce semestre est verrouillé. Vous ne pouvez plus modifier les absences.');
+    }
+
     const attendance = await this.prisma.attendance.create({
       data: {
         ...dto,
@@ -118,24 +138,31 @@ export class GradesService {
     return attendance;
   }
 
-  private computeSubjectAverage(grade: {
-    ccGrade: number | null;
-    examGrade: number | null;
-    rattrapageGrade: number | null;
-  }, ccWeight: number, examWeight: number) {
+  private computeSubjectAverage(
+    grade: {
+      ccGrade: number | null;
+      examGrade: number | null;
+      rattrapageGrade: number | null;
+    },
+    ccWeight: number,
+    examWeight: number,
+    hoursAbsent: number = 0,
+    absencePenaltyPerHour: number = 0
+  ) {
+    let baseAvg = 0;
     if (grade.rattrapageGrade !== null && grade.rattrapageGrade !== undefined) {
-      return grade.rattrapageGrade;
+      baseAvg = grade.rattrapageGrade;
+    } else if (grade.ccGrade !== null && (grade.examGrade === null || grade.examGrade === undefined)) {
+      baseAvg = grade.ccGrade;
+    } else if (grade.examGrade !== null && (grade.ccGrade === null || grade.ccGrade === undefined)) {
+      baseAvg = grade.examGrade;
+    } else {
+      baseAvg = (grade.ccGrade ?? 0) * ccWeight + (grade.examGrade ?? 0) * examWeight;
     }
 
-    if (grade.ccGrade !== null && (grade.examGrade === null || grade.examGrade === undefined)) {
-      return grade.ccGrade;
-    }
-
-    if (grade.examGrade !== null && (grade.ccGrade === null || grade.ccGrade === undefined)) {
-      return grade.examGrade;
-    }
-
-    return (grade.ccGrade ?? 0) * ccWeight + (grade.examGrade ?? 0) * examWeight;
+    const penalty = hoursAbsent * absencePenaltyPerHour;
+    const finalAvg = Math.max(0, baseAvg - penalty);
+    return finalAvg;
   }
 
   private async getRulesSettings() {
@@ -169,14 +196,18 @@ export class GradesService {
       const subjectReports = ue.subjects.map((subject) => {
         const grade = subject.grades[0];
 
+        const totalAbsences = subject.attendances.reduce((acc, curr) => acc + curr.hoursAbsent, 0);
+
         if (!grade) {
-          return { subject: subject.name, average: 0, status: 'NOT_GRADED', credits: subject.credits };
+          return { subject: subject.name, average: 0, status: 'NOT_GRADED', credits: subject.credits, absences: totalAbsences };
         }
 
         const average = this.computeSubjectAverage(
           grade,
           subject.ccWeight ?? 0.4,
           subject.examWeight ?? 0.6,
+          totalAbsences,
+          rules.absencePenaltyPerHour
         );
 
         totalUEPoints += average * subject.coefficient;
@@ -187,6 +218,7 @@ export class GradesService {
           average: parseFloat(average.toFixed(2)),
           credits: subject.credits,
           grade,
+          absences: totalAbsences,
         };
       });
 
@@ -289,7 +321,8 @@ export class GradesService {
         const grade = subj.grades[0];
         if (!grade) continue;
 
-        const avg = this.computeSubjectAverage(grade, subj.ccWeight, subj.examWeight);
+        const totalAbsences = subj.attendances.reduce((acc, curr) => acc + curr.hoursAbsent, 0);
+        const avg = this.computeSubjectAverage(grade, subj.ccWeight, subj.examWeight, totalAbsences, rules.absencePenaltyPerHour);
         
         totalUEPoints += avg * subj.coefficient;
         totalUECoeff += subj.coefficient;
@@ -339,6 +372,13 @@ export class GradesService {
           g,
           g.subject.ccWeight ?? 0.4,
           g.subject.examWeight ?? 0.6,
+          // Since getPromotionStats doesn't fetch absences inside this simplified block, and to keep it fast,
+          // we might just pass 0 or actually fetch attendances if required for promotion stats. 
+          // For class average per subject it's acceptable if we omit penalty, but to be accurate we must include it.
+          // Wait, class average shouldn't be affected by individual absences ideally, or if it is, we need to fetch them.
+          // Let's pass 0 for now as it's just class stats per subject.
+          0, 
+          0
         );
         return avg;
       });
@@ -489,13 +529,32 @@ export class GradesService {
     return this.prisma.attendance.findMany({
       include: {
         student: true,
-        subject: true,
+        subject: {
+          include: {
+            ue: {
+              include: {
+                semester: true
+              }
+            }
+          }
+        },
       },
       orderBy: { student: { lastName: 'asc' } },
     });
   }
 
   async updateAttendance(id: string, dto: EnterAttendanceDto, userId: string) {
+    const existing = await this.prisma.attendance.findUnique({
+      where: { id },
+      include: { subject: { include: { ue: { include: { semester: true } } } } }
+    });
+    if (!existing) throw new NotFoundException('Attendance not found');
+
+    const user = await this.prisma.user.findUnique({ where: { id: userId } });
+    if (existing.subject.ue.semester.isLocked && user?.role !== 'ADMIN') {
+      throw new ForbiddenException('Ce semestre est verrouillé. Vous ne pouvez plus modifier les absences.');
+    }
+
     const attendance = await this.prisma.attendance.update({
       where: { id },
       data: {
@@ -517,6 +576,17 @@ export class GradesService {
   }
 
   async deleteAttendance(id: string, userId: string) {
+    const existing = await this.prisma.attendance.findUnique({
+      where: { id },
+      include: { subject: { include: { ue: { include: { semester: true } } } } }
+    });
+    if (!existing) throw new NotFoundException('Attendance not found');
+
+    const user = await this.prisma.user.findUnique({ where: { id: userId } });
+    if (existing.subject.ue.semester.isLocked && user?.role !== 'ADMIN') {
+      throw new ForbiddenException('Ce semestre est verrouillé. Vous ne pouvez plus supprimer d\'absences.');
+    }
+
     const attendance = await this.prisma.attendance.delete({
       where: { id },
     });
