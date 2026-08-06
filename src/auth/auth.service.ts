@@ -1,4 +1,4 @@
-import { Injectable, ConflictException, UnauthorizedException, BadRequestException } from '@nestjs/common';
+import { Injectable, ConflictException, UnauthorizedException } from '@nestjs/common';
 import { DatabaseService } from '../database/database.service';
 import { RegisterDto } from './dto/register.dto';
 import { LoginDto } from './dto/login.dto';
@@ -23,47 +23,54 @@ export class AuthService {
       throw new ConflictException('User already exists');
     }
 
-    if (dto.role === Role.STUDENT) {
-      if (!dto.studentId || !dto.class) {
-        throw new BadRequestException('studentId and class are required for STUDENTS');
-      }
-    }
-
     // 2. Hash password
     const hashedPassword = await bcrypt.hash(dto.password, 10);
+    const role = dto.role || Role.STUDENT;
 
-    // 3. Create user and profile (Student or Teacher)
-    const user = await this.prisma.user.create({
-      data: {
-        email: dto.email,
-        password: hashedPassword,
-        role: dto.role || Role.STUDENT,
-      },
+    // 3. Create user and profile (Student or Teacher) atomically.
+    // Without a transaction, a failure while creating the Student/Teacher
+    // profile would leave an orphan User row (account "exists" but has no
+    // profile, and can never successfully register again since the email
+    // is already taken) — that half-created state is what breaks login
+    // after a registration attempt that looked like it failed.
+    const user = await this.prisma.$transaction(async (tx) => {
+      const created = await tx.user.create({
+        data: {
+          email: dto.email,
+          password: hashedPassword,
+          role,
+        },
+      });
+
+      if (role === Role.STUDENT) {
+        // Public self-registration doesn't collect an official matricule/
+        // class yet (those are normally assigned by the administration) —
+        // default them instead of hard-failing, admin can fill them in later.
+        await tx.student.create({
+          data: {
+            userId: created.id,
+            studentId: dto.studentId || `PENDING-${Date.now()}`,
+            firstName: dto.firstName,
+            lastName: dto.lastName,
+            class: dto.class || 'À affecter',
+            birthDate: dto.birthDate ? new Date(dto.birthDate) : null,
+            birthPlace: dto.birthPlace ?? null,
+            bacType: dto.bacType ?? null,
+            provenance: dto.provenance ?? null,
+          },
+        });
+      } else if (role === Role.TEACHER) {
+        await tx.teacher.create({
+          data: {
+            userId: created.id,
+            firstName: dto.firstName,
+            lastName: dto.lastName,
+          },
+        });
+      }
+
+      return created;
     });
-
-    if (user.role === Role.STUDENT) {
-      await this.prisma.student.create({
-        data: {
-          userId: user.id,
-          studentId: dto.studentId!,
-          firstName: dto.firstName,
-          lastName: dto.lastName,
-          class: dto.class!,
-          birthDate: dto.birthDate ? new Date(dto.birthDate) : null,
-          birthPlace: dto.birthPlace ?? null,
-          bacType: dto.bacType ?? null,
-          provenance: dto.provenance ?? null,
-        },
-      });
-    } else if (user.role === Role.TEACHER) {
-      await this.prisma.teacher.create({
-        data: {
-          userId: user.id,
-          firstName: dto.firstName,
-          lastName: dto.lastName,
-        },
-      });
-    }
 
     // 4. Return token
     return this.signToken(user.id, user.email, user.role);
