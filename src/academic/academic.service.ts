@@ -1,10 +1,27 @@
-import { Injectable, NotFoundException } from '@nestjs/common';
+import { Injectable, NotFoundException, ConflictException } from '@nestjs/common';
 import { DatabaseService } from '../database/database.service';
-import { CreateSemesterDto, CreateUEDto, CreateSubjectDto } from './dto/academic.dto';
+import { CreateSemesterDto, CreateUEDto, CreateSubjectDto, CreateClassDto } from './dto/academic.dto';
 
 @Injectable()
 export class AcademicService {
   constructor(private prisma: DatabaseService) {}
+
+  // Classes
+  async getClasses() {
+    return this.prisma.class.findMany({ orderBy: { name: 'asc' } });
+  }
+
+  async createClass(dto: CreateClassDto) {
+    const existing = await this.prisma.class.findUnique({ where: { name: dto.name } });
+    if (existing) throw new ConflictException('Cette classe existe déjà');
+    return this.prisma.class.create({ data: dto });
+  }
+
+  async deleteClass(id: string) {
+    const cls = await this.prisma.class.findUnique({ where: { id } });
+    if (!cls) throw new NotFoundException('Class not found');
+    return this.prisma.class.delete({ where: { id } });
+  }
 
   // Semesters
   async createSemester(dto: CreateSemesterDto) {

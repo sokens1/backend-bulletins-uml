@@ -35,6 +35,13 @@ export class CreateUEDto {
   semesterId: string;
 }
 
+export class CreateClassDto {
+  @ApiProperty({ example: 'LP ASUR' })
+  @IsString()
+  @IsNotEmpty()
+  name: string;
+}
+
 export class CreateSubjectDto {
   @ApiProperty({ example: 'Anglais' })
   @IsString()

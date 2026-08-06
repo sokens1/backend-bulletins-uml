@@ -1,6 +1,6 @@
 import { Controller, Post, Get, Patch, Delete, Body, Param, UseGuards } from '@nestjs/common';
 import { AcademicService } from './academic.service';
-import { CreateSemesterDto, CreateUEDto, CreateSubjectDto } from './dto/academic.dto';
+import { CreateSemesterDto, CreateUEDto, CreateSubjectDto, CreateClassDto } from './dto/academic.dto';
 import { ApiTags, ApiOperation, ApiBearerAuth } from '@nestjs/swagger';
 import { JwtAuthGuard } from '../auth/guard/jwt-auth.guard';
 import { RolesGuard } from '../auth/guard/roles.guard';
@@ -13,6 +13,26 @@ import { Role } from '@prisma/client';
 @UseGuards(JwtAuthGuard, RolesGuard)
 export class AcademicController {
   constructor(private readonly academicService: AcademicService) {}
+
+  @Get('classes')
+  @ApiOperation({ summary: 'List all classes' })
+  getClasses() {
+    return this.academicService.getClasses();
+  }
+
+  @Post('classes')
+  @Roles(Role.ADMIN)
+  @ApiOperation({ summary: 'Create a new class (Admin only)' })
+  createClass(@Body() dto: CreateClassDto) {
+    return this.academicService.createClass(dto);
+  }
+
+  @Delete('classes/:id')
+  @Roles(Role.ADMIN)
+  @ApiOperation({ summary: 'Delete a class (Admin only)' })
+  deleteClass(@Param('id') id: string) {
+    return this.academicService.deleteClass(id);
+  }
 
   @Post('semester')
   @Roles(Role.ADMIN)

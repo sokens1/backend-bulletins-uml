@@ -46,6 +46,12 @@ model Student {
   attendances Attendance[]
 }
 
+model Class {
+  id        String   @id @default(uuid())
+  name      String   @unique // e.g. "LP ASUR"
+  createdAt DateTime @default(now())
+}
+
 model Teacher {
   id        String    @id @default(uuid())
   userId    String    @unique
