@@ -1,6 +1,13 @@
 import { Controller, Post, Get, Patch, Delete, Body, Param, UseGuards } from '@nestjs/common';
 import { AcademicService } from './academic.service';
-import { CreateSemesterDto, CreateUEDto, CreateSubjectDto, CreateClassDto } from './dto/academic.dto';
+import {
+  CreateSemesterDto,
+  CreateUEDto,
+  CreateSubjectDto,
+  CreateClassDto,
+  CreateAcademicYearDto,
+  UpdateSemesterDto,
+} from './dto/academic.dto';
 import { ApiTags, ApiOperation, ApiBearerAuth } from '@nestjs/swagger';
 import { JwtAuthGuard } from '../auth/guard/jwt-auth.guard';
 import { RolesGuard } from '../auth/guard/roles.guard';
@@ -34,11 +41,52 @@ export class AcademicController {
     return this.academicService.deleteClass(id);
   }
 
+  @Get('years')
+  @ApiOperation({ summary: 'List all academic years' })
+  getYears() {
+    return this.academicService.getYears();
+  }
+
+  @Post('years')
+  @Roles(Role.ADMIN)
+  @ApiOperation({ summary: 'Create a new academic year (Admin only)' })
+  createYear(@Body() dto: CreateAcademicYearDto) {
+    return this.academicService.createYear(dto);
+  }
+
+  @Delete('years/:id')
+  @Roles(Role.ADMIN)
+  @ApiOperation({ summary: 'Delete an academic year (Admin only)' })
+  deleteYear(@Param('id') id: string) {
+    return this.academicService.deleteYear(id);
+  }
+
+  @Patch('years/:id/activate')
+  @Roles(Role.ADMIN)
+  @ApiOperation({ summary: 'Mark an academic year as the active one (Admin only)' })
+  setActiveYear(@Param('id') id: string) {
+    return this.academicService.setActiveYear(id);
+  }
+
   @Post('semester')
   @Roles(Role.ADMIN)
   @ApiOperation({ summary: 'Create a new semester (Admin only)' })
   createSemester(@Body() dto: CreateSemesterDto) {
     return this.academicService.createSemester(dto);
+  }
+
+  @Patch('semester/:id')
+  @Roles(Role.ADMIN)
+  @ApiOperation({ summary: 'Update a semester (name, year, active status) (Admin only)' })
+  updateSemester(@Param('id') id: string, @Body() dto: UpdateSemesterDto) {
+    return this.academicService.updateSemester(id, dto);
+  }
+
+  @Delete('semester/:id')
+  @Roles(Role.ADMIN)
+  @ApiOperation({ summary: 'Delete a semester (only if it has no UEs left) (Admin only)' })
+  deleteSemester(@Param('id') id: string) {
+    return this.academicService.deleteSemester(id);
   }
 
   @Patch('semester/:id/lock')

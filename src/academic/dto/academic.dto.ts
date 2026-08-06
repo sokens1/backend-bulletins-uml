@@ -42,6 +42,30 @@ export class CreateClassDto {
   name: string;
 }
 
+export class CreateAcademicYearDto {
+  @ApiProperty({ example: '2025-2026' })
+  @IsString()
+  @IsNotEmpty()
+  label: string;
+}
+
+export class UpdateSemesterDto {
+  @ApiProperty({ example: 'S5', required: false })
+  @IsString()
+  @IsOptional()
+  name?: string;
+
+  @ApiProperty({ example: '2025-2026', required: false })
+  @IsString()
+  @IsOptional()
+  year?: string;
+
+  @ApiProperty({ example: true, required: false })
+  @IsBoolean()
+  @IsOptional()
+  isActive?: boolean;
+}
+
 export class CreateSubjectDto {
   @ApiProperty({ example: 'Anglais' })
   @IsString()

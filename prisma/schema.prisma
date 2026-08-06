@@ -52,6 +52,13 @@ model Class {
   createdAt DateTime @default(now())
 }
 
+model AcademicYear {
+  id        String   @id @default(uuid())
+  label     String   @unique // e.g. "2025-2026"
+  isActive  Boolean  @default(false)
+  createdAt DateTime @default(now())
+}
+
 model Teacher {
   id        String    @id @default(uuid())
   userId    String    @unique

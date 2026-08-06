@@ -1,6 +1,13 @@
 import { Injectable, NotFoundException, ConflictException } from '@nestjs/common';
 import { DatabaseService } from '../database/database.service';
-import { CreateSemesterDto, CreateUEDto, CreateSubjectDto, CreateClassDto } from './dto/academic.dto';
+import {
+  CreateSemesterDto,
+  CreateUEDto,
+  CreateSubjectDto,
+  CreateClassDto,
+  CreateAcademicYearDto,
+  UpdateSemesterDto,
+} from './dto/academic.dto';
 
 @Injectable()
 export class AcademicService {
@@ -23,6 +30,33 @@ export class AcademicService {
     return this.prisma.class.delete({ where: { id } });
   }
 
+  // Academic Years
+  async getYears() {
+    return this.prisma.academicYear.findMany({ orderBy: { label: 'desc' } });
+  }
+
+  async createYear(dto: CreateAcademicYearDto) {
+    const existing = await this.prisma.academicYear.findUnique({ where: { label: dto.label } });
+    if (existing) throw new ConflictException('Cette année existe déjà');
+    return this.prisma.academicYear.create({ data: dto });
+  }
+
+  async deleteYear(id: string) {
+    const year = await this.prisma.academicYear.findUnique({ where: { id } });
+    if (!year) throw new NotFoundException('Academic year not found');
+    return this.prisma.academicYear.delete({ where: { id } });
+  }
+
+  async setActiveYear(id: string) {
+    const year = await this.prisma.academicYear.findUnique({ where: { id } });
+    if (!year) throw new NotFoundException('Academic year not found');
+
+    return this.prisma.$transaction(async (tx) => {
+      await tx.academicYear.updateMany({ data: { isActive: false }, where: { isActive: true } });
+      return tx.academicYear.update({ where: { id }, data: { isActive: true } });
+    });
+  }
+
   // Semesters
   async createSemester(dto: CreateSemesterDto) {
     return this.prisma.semester.create({
@@ -40,6 +74,26 @@ export class AcademicService {
         },
       },
     });
+  }
+
+  async updateSemester(id: string, dto: UpdateSemesterDto) {
+    const semester = await this.prisma.semester.findUnique({ where: { id } });
+    if (!semester) throw new NotFoundException('Semester not found');
+    return this.prisma.semester.update({ where: { id }, data: dto });
+  }
+
+  async deleteSemester(id: string) {
+    const semester = await this.prisma.semester.findUnique({
+      where: { id },
+      include: { ues: true },
+    });
+    if (!semester) throw new NotFoundException('Semester not found');
+    if (semester.ues.length > 0) {
+      throw new ConflictException(
+        'Impossible de supprimer un semestre qui contient encore des UE. Supprimez-les UE au préalable.',
+      );
+    }
+    return this.prisma.semester.delete({ where: { id } });
   }
 
   async toggleSemesterLock(id: string) {
