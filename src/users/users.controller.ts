@@ -60,6 +60,13 @@ export class UsersController {
     return this.usersService.deleteStudent(id);
   }
 
+  @Delete('students')
+  @Roles(Role.ADMIN)
+  @ApiOperation({ summary: 'Delete multiple students and their user accounts (Admin only)' })
+  deleteStudents(@Body() body: { ids: string[] }) {
+    return this.usersService.deleteStudents(body.ids);
+  }
+
   @Get('staff')
   @Roles(Role.ADMIN)
   @ApiOperation({ summary: 'List all staff users (Admin, Secretary, Teacher)' })

@@ -216,10 +216,31 @@ export class UsersService {
   }
 
   async deleteStudent(id: string) {
-    const student = await this.prisma.student.findUnique({ where: { id } });
-    if (!student) throw new NotFoundException('Student not found');
+    return this.deleteStudents([id]);
+  }
 
-    // Delete user (cascade will handle student if configured, but we do it manually to be safe or use prisma cascade)
-    return this.prisma.user.delete({ where: { id: student.userId } });
+  async deleteStudents(ids: string[]) {
+    const uniqueIds = [...new Set((ids || []).filter(Boolean))];
+    if (uniqueIds.length === 0) throw new NotFoundException('Aucun étudiant sélectionné');
+
+    const students = await this.prisma.student.findMany({ where: { id: { in: uniqueIds } } });
+    if (students.length === 0) throw new NotFoundException('Student not found');
+
+    const studentIds = students.map((s) => s.id);
+    const userIds = students.map((s) => s.userId);
+
+    // Grade/Attendance/Student aren't set up with onDelete: Cascade in the
+    // schema, so deleting the User directly (as before) hit a foreign key
+    // violation and silently failed whenever the student had any grades,
+    // attendances, or even just the Student profile row itself — delete
+    // dependents first, in a transaction, in FK order.
+    await this.prisma.$transaction([
+      this.prisma.grade.deleteMany({ where: { studentId: { in: studentIds } } }),
+      this.prisma.attendance.deleteMany({ where: { studentId: { in: studentIds } } }),
+      this.prisma.student.deleteMany({ where: { id: { in: studentIds } } }),
+      this.prisma.user.deleteMany({ where: { id: { in: userIds } } }),
+    ]);
+
+    return { deleted: students.length };
   }
 }
