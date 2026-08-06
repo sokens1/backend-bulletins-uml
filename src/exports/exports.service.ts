@@ -129,7 +129,7 @@ export class ExportsService {
         page.drawRectangle({ x: 30, y: currentY - 18, width: width - 60, height: 18, borderColor: rgb(0,0,0), borderWidth: 0.5 });
         page.drawText(subj.subject.substring(0, 48), { x: 35, y: currentY - 12, size: 8, font: fontNormal });
         page.drawText(subj.credits?.toString() || '-', { x: cols.credits + 10, y: currentY - 12, size: 8, font: fontNormal });
-        page.drawText('3,00', { x: cols.coeff + 10, y: currentY - 12, size: 8, font: fontNormal }); 
+        page.drawText(Number(subj.coefficient ?? 1).toFixed(2).replace('.', ','), { x: cols.coeff + 10, y: currentY - 12, size: 8, font: fontNormal });
         page.drawText(subj.absences > 0 ? subj.absences.toString() : '-', { x: cols.absences + 10, y: currentY - 12, size: 8, font: fontNormal, color: subj.absences > 0 ? rgb(0.8, 0, 0) : rgb(0,0,0) });
         page.drawText(Number(subj.average ?? 0).toFixed(2).replace('.', ','), { x: cols.studentNote + 15, y: currentY - 12, size: 9, font: fontBold });
         
@@ -213,9 +213,14 @@ export class ExportsService {
     page.drawText(`${report.totalCreditsWon} Crédits / 30`, { x: totalColumnX + 5, y: currentY - 25, size: 8, font: fontNormal });
     page.drawText(report.status.toUpperCase(), { x: totalColumnX + 5, y: currentY - 38, size: 8, font: fontBold, color: report.semesterAverage >= 10 ? rgb(0, 0.4, 0) : rgb(0.7, 0, 0) });
 
+    // 8bis. Statistiques de la Promotion (moyenne classe, min, max, écart-type)
+    currentY -= 50;
+    const statsText = `Statistiques promotion — Moyenne classe : ${Number(globalStats.classAverage ?? 0).toFixed(2).replace('.', ',')}   |   Min : ${Number(globalStats.min ?? 0).toFixed(2).replace('.', ',')}   |   Max : ${Number(globalStats.max ?? 0).toFixed(2).replace('.', ',')}   |   Écart-type : ${Number(globalStats.stdDev ?? 0).toFixed(2).replace('.', ',')}`;
+    page.drawText(statsText, { x: width / 2 - fontItalic.widthOfTextAtSize(statsText, 8) / 2, y: currentY, size: 8, font: fontItalic, color: rgb(0.3, 0.3, 0.3) });
+
     // 9. Final Footer Blocks
-    currentY -= 80;
-    page.drawText(`Décision du Jury :    ${report.semesterAverage.toFixed(2).replace('.', ',')}`, { x: 60, y: currentY, size: 10, font: fontBold, color: rgb(0, 0, 0.4) });
+    currentY -= 30;
+    page.drawText(`Décision du Jury :    ${report.status}`, { x: 60, y: currentY, size: 10, font: fontBold, color: rgb(0, 0, 0.4) });
     page.drawLine({ start: { x: 160, y: currentY - 2 }, end: { x: 535, y: currentY - 2 }, thickness: 0.5, color: rgb(0, 0, 0.4) });
 
     currentY -= 40;
@@ -235,6 +240,7 @@ export class ExportsService {
 
   async generateAnnualBulletinPdf(studentId: string, year: string): Promise<Buffer> {
     const annualReport = await this.gradesService.calculateAnnualReport(studentId, year);
+    const globalStats = await this.gradesService.getAnnualPromotionStats(year);
     const semesters = await this.prisma.semester.findMany({
       where: { year },
       orderBy: { name: 'asc' },
@@ -356,12 +362,160 @@ export class ExportsService {
     });
     page.drawText('Moyenne de l\'étudiant', { x: 60, y: currentY - 25, size: 11, font: fontBold });
     page.drawText(Number(annualReport.annualAverage ?? 0).toFixed(2), { x: cols.avgStart + 20, y: currentY - 25, size: 14, font: fontBold, color: rgb(0, 0, 0.8) });
-    
+
     page.drawText(`DÉCISION : ${annualReport.status.toUpperCase()}`, { x: 60, y: currentY - 60, size: 11, font: fontBold });
     page.drawText(`MENTION : ${annualReport.mention.toUpperCase()}`, { x: 300, y: currentY - 60, size: 11, font: fontBold });
+    page.drawText(`JURY : ${annualReport.juryDecision.toUpperCase()}`, { x: 60, y: currentY - 78, size: 10, font: fontBold, color: rgb(0, 0, 0.4) });
+
+    // Statistiques de la promotion (moyenne classe, min, max, écart-type)
+    currentY -= 105;
+    const statsText = `Statistiques promotion — Moyenne classe : ${Number(globalStats.classAverage ?? 0).toFixed(2)}   |   Min : ${Number(globalStats.min ?? 0).toFixed(2)}   |   Max : ${Number(globalStats.max ?? 0).toFixed(2)}   |   Écart-type : ${Number(globalStats.stdDev ?? 0).toFixed(2)}`;
+    page.drawText(statsText, { x: width / 2 - fontItalic.widthOfTextAtSize(statsText, 8) / 2, y: currentY, size: 8, font: fontItalic, color: rgb(0.3, 0.3, 0.3) });
 
     const pdfBytes = await pdfDoc.save();
     return Buffer.from(pdfBytes);
+  }
+
+  private htmlDocument(title: string, body: string): string {
+    return `<!DOCTYPE html>
+<html lang="fr">
+<head>
+<meta charset="UTF-8" />
+<title>${title}</title>
+<style>
+  @media print { body { margin: 0; } .no-print { display: none; } }
+  body { font-family: Arial, Helvetica, sans-serif; color: #1a1a2e; max-width: 800px; margin: 20px auto; padding: 0 20px; }
+  h1 { text-align: center; color: #000066; font-size: 20px; margin-bottom: 4px; }
+  .subtitle { text-align: center; color: #444; font-style: italic; margin-bottom: 20px; }
+  .header { text-align: center; font-weight: bold; font-size: 12px; line-height: 1.4; margin-bottom: 10px; }
+  .student-box { border: 1px solid #000; padding: 10px 14px; margin-bottom: 20px; display: flex; justify-content: space-between; flex-wrap: wrap; gap: 8px; }
+  table { width: 100%; border-collapse: collapse; margin-bottom: 16px; }
+  th, td { border: 1px solid #333; padding: 6px 8px; font-size: 13px; text-align: left; }
+  th { background: #eef0fa; }
+  .ue-row td { background: #f7f7f7; font-weight: bold; color: #000066; }
+  .ue-footer td { background: #fbfbfb; font-weight: bold; }
+  .avg-box { background: #ffe680; border: 1.5px solid #000; padding: 10px 16px; display: inline-block; font-weight: bold; margin-bottom: 20px; }
+  .stats { text-align: center; font-style: italic; color: #444; font-size: 13px; margin: 16px 0; }
+  .decision { font-weight: bold; color: #000066; margin: 10px 0; }
+  .footer { text-align: center; margin-top: 30px; font-size: 12px; }
+  .disclaimer { text-align: center; font-size: 11px; font-style: italic; color: #555; margin-top: 30px; }
+  .toolbar { text-align: right; margin-bottom: 10px; }
+  .toolbar button { padding: 6px 14px; cursor: pointer; }
+</style>
+</head>
+<body>
+<div class="toolbar no-print"><button onclick="window.print()">🖨️ Imprimer / Exporter en PDF</button></div>
+${body}
+</body>
+</html>`;
+  }
+
+  async generateBulletinHtml(studentId: string, semesterId: string): Promise<string> {
+    const report = await this.gradesService.calculateStudentReport(studentId, semesterId);
+    if (!report || !report.student) {
+      throw new NotFoundException('Données de l\'étudiant introuvables pour ce bulletin.');
+    }
+    const globalStats = await this.gradesService.getPromotionStats(semesterId);
+    const semester = await this.prisma.semester.findUnique({ where: { id: semesterId } });
+
+    let mention = 'Passable';
+    if (report.semesterAverage >= 16) mention = 'Très Bien';
+    else if (report.semesterAverage >= 14) mention = 'Bien';
+    else if (report.semesterAverage >= 12) mention = 'Assez Bien';
+
+    const ueRows = report.report.map((ue, idx) => {
+      const subjectRows = ue.subjects.map((subj: any) => `
+        <tr>
+          <td>${subj.subject}</td>
+          <td>${subj.credits ?? '-'}</td>
+          <td>${Number(subj.coefficient ?? 1).toFixed(2)}</td>
+          <td>${subj.absences > 0 ? subj.absences : '-'}</td>
+          <td><strong>${Number(subj.average ?? 0).toFixed(2)}</strong></td>
+        </tr>`).join('');
+      return `
+        <tr class="ue-row"><td colspan="5">UE ${semester?.name?.substring(1) || '0'}-${idx + 1} : ${ue.ueName}</td></tr>
+        ${subjectRows}
+        <tr class="ue-footer">
+          <td>Moyenne UE</td>
+          <td>${ue.creditsExpected}</td>
+          <td></td>
+          <td></td>
+          <td>${Number(ue.average ?? 0).toFixed(2)} — ${ue.status}</td>
+        </tr>`;
+    }).join('');
+
+    const body = `
+      <div class="header">
+        INSTITUT NATIONAL DE LA POSTE, DES TECHNOLOGIES DE L'INFORMATION ET DE LA COMMUNICATION<br/>
+        DIRECTION DES ETUDES ET DE LA PEDAGOGIE
+      </div>
+      <h1>Bulletin de notes du Semestre ${semester?.name?.replace('S', '') || ''}</h1>
+      <div class="subtitle">Année universitaire : ${semester?.year || ''}</div>
+      <div class="student-box">
+        <div><strong>Nom(s) et Prénom(s) :</strong> ${report.student.firstName} ${report.student.lastName}</div>
+        <div><strong>Classe :</strong> ${report.student.class || 'Licence Professionnelle'}</div>
+      </div>
+      <table>
+        <thead>
+          <tr><th>Matière</th><th>Crédits</th><th>Coefficient</th><th>Hrs Abs.</th><th>Note</th></tr>
+        </thead>
+        <tbody>${ueRows}</tbody>
+      </table>
+      <div class="avg-box">Moyenne au Semestre ${semester?.name?.substring(1) || ''} : ${Number(report.semesterAverage ?? 0).toFixed(2)}/20</div>
+      <p>Rang de l'étudiant au semestre : <strong>${report.rank}${report.rank === 1 ? 'er' : 'ème'} / ${report.totalStudents}</strong> — Mention : <strong>${mention}</strong></p>
+      <p>Crédits acquis au semestre : <strong>${report.totalCreditsWon} / ${report.totalCreditsExpected}</strong></p>
+      <div class="stats">Statistiques promotion — Moyenne classe : ${Number(globalStats.classAverage ?? 0).toFixed(2)} | Min : ${Number(globalStats.min ?? 0).toFixed(2)} | Max : ${Number(globalStats.max ?? 0).toFixed(2)} | Écart-type : ${Number(globalStats.stdDev ?? 0).toFixed(2)}</div>
+      <div class="decision">Décision du Jury : ${report.status}</div>
+      <div class="footer">
+        Fait à Libreville, le ${new Date().toLocaleDateString('fr-FR')}<br/>
+        LE DIRECTEUR DES ETUDES ET DE LA PEDAGOGIE<br/>
+        <strong>Davy Edgard MOUSSAVOU</strong>
+      </div>
+      <div class="disclaimer">Il ne sera délivré qu'un seul et unique exemplaire de bulletins de notes. L'étudiant est donc prié d'en faire plusieurs copies légalisées.</div>
+    `;
+
+    return this.htmlDocument(`Bulletin ${semester?.name || ''} - ${report.student.firstName} ${report.student.lastName}`, body);
+  }
+
+  async generateAnnualBulletinHtml(studentId: string, year: string): Promise<string> {
+    const annualReport = await this.gradesService.calculateAnnualReport(studentId, year);
+    const globalStats = await this.gradesService.getAnnualPromotionStats(year);
+    const semesters = await this.prisma.semester.findMany({ where: { year }, orderBy: { name: 'asc' } });
+    const semesterNameById = new Map(semesters.map((s) => [s.id, s.name]));
+
+    const s5Report = annualReport.semesterReports.find((r: any) => semesterNameById.get(r.semesterId) === 'S5');
+    const s6Report = annualReport.semesterReports.find((r: any) => semesterNameById.get(r.semesterId) === 'S6');
+
+    const ueRows = (s5Report?.report || []).map((ue: any) => {
+      const ueS6 = s6Report?.report.find((u: any) => (u.ueCode && ue.ueCode ? u.ueCode === ue.ueCode : u.ueName === ue.ueName));
+      const annualUEAvg = ueS6 ? ((ue.average + ueS6.average) / 2).toFixed(2) : '-';
+      return `
+        <tr><td>${ue.ueCode || 'UE'} : ${ue.ueName}</td><td>S5</td><td>${Number(ue.average ?? 0).toFixed(2)}</td></tr>
+        ${ueS6 ? `<tr><td></td><td>S6</td><td>${Number(ueS6.average ?? 0).toFixed(2)}</td></tr>
+        <tr class="ue-footer"><td></td><td>Annuel</td><td>${annualUEAvg}</td></tr>` : ''}
+      `;
+    }).join('');
+
+    const body = `
+      <div class="header">RÉPUBLIQUE GABONAISE — INSTITUT NATIONAL DE LA POSTE, DES TIC</div>
+      <h1>Bulletin de notes Annuel</h1>
+      <div class="subtitle">Année universitaire : ${year}</div>
+      <div class="student-box">
+        <div><strong>Nom et Prénom :</strong> ${annualReport.student.firstName} ${annualReport.student.lastName}</div>
+        <div><strong>Lieu de naissance :</strong> ${annualReport.student.birthPlace || 'N/A'}</div>
+      </div>
+      <table>
+        <thead><tr><th>Unité d'Enseignement</th><th>Session</th><th>Moyenne</th></tr></thead>
+        <tbody>${ueRows}</tbody>
+      </table>
+      <div class="avg-box">Moyenne de l'étudiant : ${Number(annualReport.annualAverage ?? 0).toFixed(2)}/20</div>
+      <div class="decision">DÉCISION : ${annualReport.status.toUpperCase()}</div>
+      <div class="decision">MENTION : ${annualReport.mention.toUpperCase()}</div>
+      <div class="decision">JURY : ${annualReport.juryDecision.toUpperCase()}</div>
+      <div class="stats">Statistiques promotion — Moyenne classe : ${Number(globalStats.classAverage ?? 0).toFixed(2)} | Min : ${Number(globalStats.min ?? 0).toFixed(2)} | Max : ${Number(globalStats.max ?? 0).toFixed(2)} | Écart-type : ${Number(globalStats.stdDev ?? 0).toFixed(2)}</div>
+    `;
+
+    return this.htmlDocument(`Bulletin Annuel ${year} - ${annualReport.student.firstName} ${annualReport.student.lastName}`, body);
   }
 
   async generatePromotionXlsx(semesterId: string): Promise<Buffer> {

@@ -282,6 +282,13 @@ export class GradesService {
     return this.settingsService.getAcademicRulesSettings();
   }
 
+  private computeStdDev(values: number[]): number {
+    if (!values.length) return 0;
+    const mean = values.reduce((a, b) => a + b, 0) / values.length;
+    const variance = values.reduce((acc, v) => acc + Math.pow(v - mean, 2), 0) / values.length;
+    return Math.sqrt(variance);
+  }
+
   async calculateStudentReport(studentId: string, semesterId: string) {
     const rules = await this.getRulesSettings();
     const student = await this.findStudent(studentId);
@@ -312,7 +319,7 @@ export class GradesService {
         const totalAbsences = subject.attendances.reduce((acc, curr) => acc + curr.hoursAbsent, 0);
 
         if (!grade) {
-          return { subject: subject.name, average: 0, status: 'NOT_GRADED', credits: subject.credits, absences: totalAbsences };
+          return { subject: subject.name, average: 0, status: 'NOT_GRADED', credits: subject.credits, coefficient: subject.coefficient, absences: totalAbsences };
         }
 
         const average = this.computeSubjectAverage(
@@ -330,6 +337,7 @@ export class GradesService {
           subject: subject.name,
           average: parseFloat(average.toFixed(2)),
           credits: subject.credits,
+          coefficient: subject.coefficient,
           grade,
           absences: totalAbsences,
         };
@@ -470,8 +478,8 @@ export class GradesService {
     );
 
     const averages = studentAverages.map(s => s.avg);
-    const sortedAverages = [...averages].sort((a, b) => b - a);
-    
+    const stdDev = this.computeStdDev(averages);
+
     // Simplified subject stats calculation
     const subjects = await this.prisma.subject.findMany({
       where: { ue: { semesterId } },
@@ -515,6 +523,7 @@ export class GradesService {
       classAverage: parseFloat((averages.reduce((a, b) => a + b, 0) / averages.length || 0).toFixed(2)),
       min: parseFloat((averages.length > 0 ? Math.min(...averages) : 0).toFixed(2)),
       max: parseFloat((averages.length > 0 ? Math.max(...averages) : 0).toFixed(2)),
+      stdDev: parseFloat(stdDev.toFixed(2)),
       count: students.length,
       subjectStats,
       studentResults: await Promise.all(studentAverages.map(async (s) => {
@@ -563,11 +572,13 @@ export class GradesService {
 
     const averages = studentReports.map(r => r.annualAverage);
     const sortedAverages = [...averages].sort((a, b) => b - a);
+    const stdDev = this.computeStdDev(averages);
 
     return {
       classAverage: parseFloat((averages.reduce((a, b) => a + b, 0) / averages.length || 0).toFixed(2)),
       min: parseFloat((averages.length > 0 ? Math.min(...averages) : 0).toFixed(2)),
       max: parseFloat((averages.length > 0 ? Math.max(...averages) : 0).toFixed(2)),
+      stdDev: parseFloat(stdDev.toFixed(2)),
       count: students.length,
       studentResults: studentReports.map(r => ({
         ...r,

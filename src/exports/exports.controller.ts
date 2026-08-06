@@ -45,6 +45,31 @@ export class ExportsController {
     res.end(buffer);
   }
 
+  @Get('bulletin-html/:studentId')
+  @ApiOperation({ summary: 'Download student bulletin in HTML format' })
+  async downloadBulletinHtml(
+    @Param('studentId') studentId: string,
+    @Query('semesterId') semesterId: string,
+    @Res() res: Response,
+    @Request() req,
+  ) {
+    if (req.user?.role === 'STUDENT') {
+      const semester = await this.prisma.semester.findUnique({ where: { id: semesterId } });
+      if (semester?.isLocked) {
+        throw new ForbiddenException('Le téléchargement des bulletins est fermé pour ce semestre.');
+      }
+    }
+
+    const html = await this.exportsService.generateBulletinHtml(studentId, semesterId);
+
+    res.set({
+      'Content-Type': 'text/html; charset=utf-8',
+      'Content-Disposition': `attachment; filename=bulletin_${studentId}.html`,
+    });
+
+    res.send(html);
+  }
+
   @Get('bulletin-annual/:studentId')
   @ApiOperation({ summary: 'Download student annual bulletin in PDF format' })
   async downloadAnnualBulletin(
@@ -71,6 +96,31 @@ export class ExportsController {
     });
 
     res.end(buffer);
+  }
+
+  @Get('bulletin-annual-html/:studentId')
+  @ApiOperation({ summary: 'Download student annual bulletin in HTML format' })
+  async downloadAnnualBulletinHtml(
+    @Param('studentId') studentId: string,
+    @Query('year') year: string,
+    @Res() res: Response,
+    @Request() req,
+  ) {
+    if (req.user?.role === 'STUDENT') {
+      const semesters = await this.prisma.semester.findMany({ where: { year } });
+      if (semesters.some(s => s.isLocked)) {
+        throw new ForbiddenException('Le téléchargement des bulletins annuels est fermé.');
+      }
+    }
+
+    const html = await this.exportsService.generateAnnualBulletinHtml(studentId, year);
+
+    res.set({
+      'Content-Type': 'text/html; charset=utf-8',
+      'Content-Disposition': `attachment; filename=bulletin_annuel_${studentId}.html`,
+    });
+
+    res.send(html);
   }
 
   @Get('promotion')
