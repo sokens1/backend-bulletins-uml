@@ -330,27 +330,29 @@ export class GradesService {
             .filter((a) => a.studentId === studentId)
             .reduce((acc, curr) => acc + curr.hoursAbsent, 0);
 
-          if (!grade) {
-            return { subject: subject.name, average: 0, status: 'NOT_GRADED', credits: subject.credits, coefficient: subject.coefficient, absences: totalAbsences };
-          }
+          const average = grade
+            ? this.computeSubjectAverage(
+                grade,
+                subject.ccWeight ?? 0.4,
+                subject.examWeight ?? 0.6,
+                totalAbsences,
+                rules.absencePenaltyPerHour
+              )
+            : 0;
 
-          const average = this.computeSubjectAverage(
-            grade,
-            subject.ccWeight ?? 0.4,
-            subject.examWeight ?? 0.6,
-            totalAbsences,
-            rules.absencePenaltyPerHour
-          );
-
+          // An ungraded subject must still weigh into the UE average as a 0 — previously
+          // it was skipped entirely, so a UE with e.g. 2 graded subjects and 3 completely
+          // ungraded ones averaged only the 2 graded ones and could wrongly come out "acquise".
           totalUEPoints += average * subject.coefficient;
           totalUECoeff += subject.coefficient;
 
           return {
             subject: subject.name,
             average: parseFloat(average.toFixed(2)),
+            status: grade ? undefined : 'NOT_GRADED',
             credits: subject.credits,
             coefficient: subject.coefficient,
-            grade,
+            grade: grade ?? null,
             absences: totalAbsences,
           };
         });
