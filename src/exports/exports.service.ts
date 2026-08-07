@@ -950,9 +950,8 @@ ${body}
   async importGradesFromExcel(buffer: Buffer, semesterId: string, userId: string) {
     const workbook = new ExcelJS.Workbook();
     await workbook.xlsx.load(buffer as any);
-    const worksheet = workbook.getWorksheet(1);
 
-    if (!worksheet) throw new NotFoundException('Worksheet not found');
+    if (workbook.worksheets.length === 0) throw new NotFoundException('Worksheet not found');
 
     // Loaded once up front (instead of per-row queries) so matching is both faster and
     // resilient to whitespace/case differences between the Excel file and the database.
@@ -964,96 +963,116 @@ ${body}
     const subjectById = new Map(subjects.map((s) => [s.id, s]));
     const subjectByName = new Map(subjects.map((s) => [this.normalizeText(s.name), s]));
 
-    // Pivot layout: columns 1-3 are MATRICULE/NOM/PRÉNOM, everything after is a
-    // "{Subject} — CC/EXAMEN/RATTRAPAGE" triplet (one per subject, in any order).
-    const headerRow = worksheet.getRow(1);
-    const gradeColumns: { col: number; field: 'cc' | 'exam' | 'rattr'; subjectRef: string }[] = [];
-    for (let c = 4; c <= worksheet.columnCount; c++) {
-      const headerText = headerRow.getCell(c).toString().trim();
-      const match = headerText.match(ExportsService.GRADE_COLUMN_HEADER);
-      if (!match) continue;
-      const field = match[2].toUpperCase() === 'CC' ? 'cc' : match[2].toUpperCase() === 'EXAMEN' ? 'exam' : 'rattr';
-      gradeColumns.push({ col: c, field, subjectRef: match[1].trim() });
+    let count = 0;
+    let skipped = 0;
+    const errors: string[] = [];
+    let anyGradeColumnsFound = false;
+
+    // Two-sheet layout (CC/Examen on one sheet, Rattrapage on another) or a single sheet
+    // with all three — either way, every sheet is scanned for "{Subject} — CC/EXAMEN/RATTRAPAGE"
+    // headers and processed the same way, so both layouts import correctly.
+    for (const worksheet of workbook.worksheets) {
+      const headerRow = worksheet.getRow(1);
+      const gradeColumns: { col: number; field: 'cc' | 'exam' | 'rattr'; subjectRef: string }[] = [];
+      for (let c = 4; c <= worksheet.columnCount; c++) {
+        const headerText = headerRow.getCell(c).toString().trim();
+        const match = headerText.match(ExportsService.GRADE_COLUMN_HEADER);
+        if (!match) continue;
+        const field = match[2].toUpperCase() === 'CC' ? 'cc' : match[2].toUpperCase() === 'EXAMEN' ? 'exam' : 'rattr';
+        gradeColumns.push({ col: c, field, subjectRef: match[1].trim() });
+      }
+
+      if (gradeColumns.length === 0) continue; // e.g. an unrelated/instructions sheet
+      anyGradeColumnsFound = true;
+
+      for (let i = 2; i <= worksheet.rowCount; i++) {
+          const row = worksheet.getRow(i);
+          const studentRef = row.getCell(1).toString().trim();
+
+          if (!studentRef) {
+            continue; // blank row
+          }
+
+          const student = studentById.get(studentRef) ?? studentByMatricule.get(this.normalizeText(studentRef));
+          if (!student) {
+            skipped++;
+            errors.push(`${worksheet.name} - Ligne ${i}: étudiant introuvable ("${studentRef}")`);
+            continue;
+          }
+
+          // Group this row's CC/EXAMEN/RATTRAPAGE cells by subject; subjects left entirely
+          // blank for this student are simply skipped (not counted as an error).
+          const bySubject = new Map<string, { cc?: string; exam?: string; rattr?: string }>();
+          for (const { col, field, subjectRef } of gradeColumns) {
+            const raw = row.getCell(col).toString().trim();
+            if (raw === '') continue;
+            const entry = bySubject.get(subjectRef) ?? {};
+            entry[field] = raw;
+            bySubject.set(subjectRef, entry);
+          }
+
+          for (const [subjectRef, values] of bySubject) {
+            const subject = subjectById.get(subjectRef) ?? subjectByName.get(this.normalizeText(subjectRef));
+            if (!subject) {
+              skipped++;
+              errors.push(`${worksheet.name} - Ligne ${i} (${student.studentId}): matière introuvable pour ce semestre ("${subjectRef}")`);
+              continue;
+            }
+
+            const cc = this.parseGradeCell(values.cc ?? '', 'Note CC');
+            const exam = this.parseGradeCell(values.exam ?? '', 'Note Examen');
+            const rattr = this.parseGradeCell(values.rattr ?? '', 'Note Rattrapage');
+            const rowErrors = [cc.error, exam.error, rattr.error].filter(Boolean);
+            if (rowErrors.length > 0) {
+              skipped++;
+              errors.push(`${worksheet.name} - Ligne ${i} (${student.studentId}/${subject.name}): ${rowErrors.join(', ')}`);
+              continue;
+            }
+
+            try {
+              // Each sheet only supplies some of the fields (e.g. the Rattrapage sheet
+              // leaves cc/exam undefined) — enterGrade's upsert only touches the fields
+              // it's given, so calling it once per sheet never clobbers the other sheet's data.
+              await this.gradesService.enterGrade({
+                  studentId: student.id,
+                  subjectId: subject.id,
+                  ccGrade: cc.value,
+                  examGrade: exam.value,
+                  rattrapageGrade: rattr.value,
+              }, userId);
+              count++;
+            } catch (e) {
+              skipped++;
+              errors.push(`${worksheet.name} - Ligne ${i} (${student.studentId}/${subject.name}): ${e instanceof Error ? e.message : 'erreur inconnue'}`);
+            }
+          }
+      }
     }
 
-    if (gradeColumns.length === 0) {
+    if (!anyGradeColumnsFound) {
       throw new NotFoundException(
         "Aucune colonne de notes reconnue (attendu : \"Matière — CC\", \"Matière — EXAMEN\", \"Matière — RATTRAPAGE\"). " +
         "Utilisez le canevas généré par l'application (bouton \"Canevas notes\").",
       );
     }
 
-    let count = 0;
-    let skipped = 0;
-    const errors: string[] = [];
-    for (let i = 2; i <= worksheet.rowCount; i++) {
-        const row = worksheet.getRow(i);
-        const studentRef = row.getCell(1).toString().trim();
-
-        if (!studentRef) {
-          continue; // blank row
-        }
-
-        const student = studentById.get(studentRef) ?? studentByMatricule.get(this.normalizeText(studentRef));
-        if (!student) {
-          skipped++;
-          errors.push(`Ligne ${i}: étudiant introuvable ("${studentRef}")`);
-          continue;
-        }
-
-        // Group this row's CC/EXAMEN/RATTRAPAGE cells by subject; subjects left entirely
-        // blank for this student are simply skipped (not counted as an error).
-        const bySubject = new Map<string, { cc?: string; exam?: string; rattr?: string }>();
-        for (const { col, field, subjectRef } of gradeColumns) {
-          const raw = row.getCell(col).toString().trim();
-          if (raw === '') continue;
-          const entry = bySubject.get(subjectRef) ?? {};
-          entry[field] = raw;
-          bySubject.set(subjectRef, entry);
-        }
-
-        for (const [subjectRef, values] of bySubject) {
-          const subject = subjectById.get(subjectRef) ?? subjectByName.get(this.normalizeText(subjectRef));
-          if (!subject) {
-            skipped++;
-            errors.push(`Ligne ${i} (${student.studentId}): matière introuvable pour ce semestre ("${subjectRef}")`);
-            continue;
-          }
-
-          const cc = this.parseGradeCell(values.cc ?? '', 'Note CC');
-          const exam = this.parseGradeCell(values.exam ?? '', 'Note Examen');
-          const rattr = this.parseGradeCell(values.rattr ?? '', 'Note Rattrapage');
-          const rowErrors = [cc.error, exam.error, rattr.error].filter(Boolean);
-          if (rowErrors.length > 0) {
-            skipped++;
-            errors.push(`Ligne ${i} (${student.studentId}/${subject.name}): ${rowErrors.join(', ')}`);
-            continue;
-          }
-
-          try {
-            await this.gradesService.enterGrade({
-                studentId: student.id,
-                subjectId: subject.id,
-                ccGrade: cc.value,
-                examGrade: exam.value,
-                rattrapageGrade: rattr.value,
-            }, userId);
-            count++;
-          } catch (e) {
-            skipped++;
-            errors.push(`Ligne ${i} (${student.studentId}/${subject.name}): ${e instanceof Error ? e.message : 'erreur inconnue'}`);
-          }
-        }
-    }
-
     return { imported: count, skipped, errors };
+  }
+
+  private styleTemplateHeaderRow(worksheet: ExcelJS.Worksheet) {
+    worksheet.getRow(1).font = { bold: true };
+    worksheet.getRow(1).fill = {
+      type: 'pattern',
+      pattern: 'solid',
+      fgColor: { argb: 'FFE0E0E0' },
+    };
   }
 
   async generateTemplate(type: 'STUDENTS' | 'GRADES', semesterId?: string): Promise<Buffer> {
     const workbook = new ExcelJS.Workbook();
-    const worksheet = workbook.addWorksheet('Template');
 
     if (type === 'STUDENTS') {
+      const worksheet = workbook.addWorksheet('Etudiants');
       worksheet.columns = [
         { header: 'MATRICULE', key: 'studentId', width: 20 },
         { header: 'NOM', key: 'lastName', width: 25 },
@@ -1079,16 +1098,12 @@ ${body}
           provenance: 'Lycée Technique',
           password: 'Password123'
       });
+      this.styleTemplateHeaderRow(worksheet);
     } else {
-      // Pivot layout: one row per student, one CC/EXAMEN/RATTRAPAGE column triplet per
-      // subject — so neither the student nor the subject name is ever repeated (unlike
-      // a flat "one row per student×subject" sheet, which duplicates both on every line).
-      const columns: any[] = [
-        { header: 'MATRICULE', key: 'studentId', width: 20 },
-        { header: 'NOM', key: 'lastName', width: 22 },
-        { header: 'PRÉNOM', key: 'firstName', width: 22 },
-      ];
-
+      // Two sheets: CC/Examen on one page, Rattrapage on its own — split per the
+      // school's marking workflow (regular session vs. retake session), instead of one
+      // combined page. Both are pivoted (one row per student, one column pair/single per
+      // subject) so neither the student nor the subject name is ever repeated.
       const subjects = semesterId
         ? await this.prisma.subject.findMany({
             where: { ue: { semesterId } },
@@ -1099,47 +1114,67 @@ ${body}
       const students = semesterId
         ? await this.prisma.student.findMany({ orderBy: [{ lastName: 'asc' }, { firstName: 'asc' }] })
         : [];
-
       const effectiveSubjects = subjects.length > 0 ? subjects : [{ id: 'sample', name: 'Anglais technique' } as any];
-      effectiveSubjects.forEach((subject, idx) => {
-        columns.push({ header: `${subject.name} — CC`, key: `s${idx}_cc`, width: 14 });
-        columns.push({ header: `${subject.name} — EXAMEN`, key: `s${idx}_exam`, width: 14 });
-        columns.push({ header: `${subject.name} — RATTRAPAGE`, key: `s${idx}_rattr`, width: 16 });
-      });
-      worksheet.columns = columns;
+      const noSubjectsMessage = 'Aucune matière enregistrée pour ce semestre — créez-les dans Gestion académique avant d\'importer des notes.';
 
-      worksheet.getCell('A1').note =
-        'MATRICULE, NOM et PRÉNOM sont pré-remplis automatiquement, et chaque matière du semestre a ses ' +
-        'propres colonnes CC / EXAMEN / RATTRAPAGE — il ne reste qu\'à saisir les notes. ' +
+      const identityColumns = [
+        { header: 'MATRICULE', key: 'studentId', width: 20 },
+        { header: 'NOM', key: 'lastName', width: 22 },
+        { header: 'PRÉNOM', key: 'firstName', width: 22 },
+      ];
+
+      // --- Sheet 1: CC + Examen ---
+      const ccExamSheet = workbook.addWorksheet('Notes CC-Examen');
+      const ccExamColumns = [...identityColumns];
+      effectiveSubjects.forEach((subject, idx) => {
+        ccExamColumns.push({ header: `${subject.name} — CC`, key: `s${idx}_cc`, width: 14 });
+        ccExamColumns.push({ header: `${subject.name} — EXAMEN`, key: `s${idx}_exam`, width: 14 });
+      });
+      ccExamSheet.columns = ccExamColumns;
+      ccExamSheet.getCell('A1').note =
+        'MATRICULE, NOM et PRÉNOM sont pré-remplis, et chaque matière a ses colonnes CC / EXAMEN — ' +
+        'il ne reste qu\'à saisir les notes. Les rattrapages se saisissent sur l\'onglet "Rattrapage". ' +
+        'Ne modifiez pas les en-têtes de colonnes : ils servent à retrouver la matière lors de l\'import.';
+
+      // --- Sheet 2: Rattrapage only ---
+      const rattrSheet = workbook.addWorksheet('Rattrapage');
+      const rattrColumns = [...identityColumns];
+      effectiveSubjects.forEach((subject, idx) => {
+        rattrColumns.push({ header: `${subject.name} — RATTRAPAGE`, key: `s${idx}_rattr`, width: 16 });
+      });
+      rattrSheet.columns = rattrColumns;
+      rattrSheet.getCell('A1').note =
+        'Ne renseignez ici que les notes de rattrapage — laissez vide pour les étudiants non concernés. ' +
         'Ne modifiez pas les en-têtes de colonnes : ils servent à retrouver la matière lors de l\'import.';
 
       if (semesterId && subjects.length === 0) {
-        worksheet.addRow({ studentId: '', lastName: '', firstName: '', s0_cc: 'Aucune matière enregistrée pour ce semestre — créez-les dans Gestion académique avant d\'importer des notes.' });
+        ccExamSheet.addRow({ studentId: '', lastName: '', firstName: '', s0_cc: noSubjectsMessage });
+        rattrSheet.addRow({ studentId: '', lastName: '', firstName: '', s0_rattr: noSubjectsMessage });
       } else if (semesterId) {
         for (const student of students) {
-          const rowData: any = { studentId: student.studentId, lastName: student.lastName, firstName: student.firstName };
+          const identity = { studentId: student.studentId, lastName: student.lastName, firstName: student.firstName };
+
+          const ccExamRow: any = { ...identity };
+          const rattrRow: any = { ...identity };
           effectiveSubjects.forEach((_subject, idx) => {
-            rowData[`s${idx}_cc`] = '';
-            rowData[`s${idx}_exam`] = '';
-            rowData[`s${idx}_rattr`] = '';
+            ccExamRow[`s${idx}_cc`] = '';
+            ccExamRow[`s${idx}_exam`] = '';
+            rattrRow[`s${idx}_rattr`] = '';
           });
-          worksheet.addRow(rowData);
+          ccExamSheet.addRow(ccExamRow);
+          rattrSheet.addRow(rattrRow);
         }
       } else {
         // Generic fallback sample when no semester context is available.
-        worksheet.addRow({ studentId: 'INPTIC-2024-001', lastName: 'DUPONT', firstName: 'Jean', s0_cc: 14.5, s0_exam: 12, s0_rattr: '' });
+        ccExamSheet.addRow({ studentId: 'INPTIC-2024-001', lastName: 'DUPONT', firstName: 'Jean', s0_cc: 14.5, s0_exam: 12 });
+        rattrSheet.addRow({ studentId: 'INPTIC-2024-001', lastName: 'DUPONT', firstName: 'Jean', s0_rattr: '' });
       }
 
-      worksheet.views = [{ state: 'frozen', xSplit: 3, ySplit: 1 }];
+      ccExamSheet.views = [{ state: 'frozen', xSplit: 3, ySplit: 1 }];
+      rattrSheet.views = [{ state: 'frozen', xSplit: 3, ySplit: 1 }];
+      this.styleTemplateHeaderRow(ccExamSheet);
+      this.styleTemplateHeaderRow(rattrSheet);
     }
-
-    // Styling headers
-    worksheet.getRow(1).font = { bold: true };
-    worksheet.getRow(1).fill = {
-      type: 'pattern',
-      pattern: 'solid',
-      fgColor: { argb: 'FFE0E0E0' }
-    };
 
     const buffer = await workbook.xlsx.writeBuffer();
     return Buffer.from(buffer);
