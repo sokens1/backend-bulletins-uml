@@ -383,6 +383,14 @@ export class GradesService {
         } else if (semesterAverage >= 10) {
           status = 'UE Acquise par Compensation';
           creditsWon = ue.creditsExpected;
+        } else {
+          // The UE itself isn't acquired (no direct pass, no semester-wide compensation),
+          // but each individual subject that reached 10/20 on its own still earns its
+          // credits — otherwise two validated 2-credit subjects inside a failing UE
+          // counted for 0 credits instead of the 4 they actually earned.
+          creditsWon = ue.subjects
+            .filter((s) => s.average >= 10)
+            .reduce((sum, s) => sum + s.credits, 0);
         }
 
         return { ...ue, status, creditsWon };
@@ -391,7 +399,10 @@ export class GradesService {
       const totalCreditsWon = finalReport.reduce((acc, curr) => acc + curr.creditsWon, 0);
       const isSemesterValidated = totalCreditsWon >= totalSemesterCredits;
 
-      const hasCompensatedUE = finalReport.some(ue => ue.average < 10 && ue.creditsWon > 0);
+      // Checked against the actual status label (not just "average<10 but earned some
+      // credits") since a UE can now earn partial credits from its individually-passed
+      // subjects without being compensated — that's not the same thing.
+      const hasCompensatedUE = finalReport.some(ue => ue.status === 'UE Acquise par Compensation');
       const semesterStatus = isSemesterValidated
         ? (hasCompensatedUE ? 'Semestre validé par compensation' : 'Semestre validé')
         : 'Semestre non validé';
