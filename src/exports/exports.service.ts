@@ -239,10 +239,13 @@ export class ExportsService {
     page.drawText(`${rankText} / ${report.totalStudents}`, { x: 155, y: currentY - 24, size: 10, font: fontBold });
     page.drawText('Mention', { x: 305, y: currentY - 13, size: 9, font: fontNormal });
 
-    let mention = 'Passable';
+    // Mirrors calculateAnnualReport's mention scale (grades.service.ts) — an average below
+    // 10 gets no mention at all, it previously defaulted to "Passable" even for a failing grade.
+    let mention = 'Non attribuée';
     if (report.semesterAverage >= 16) mention = 'Très Bien';
     else if (report.semesterAverage >= 14) mention = 'Bien';
     else if (report.semesterAverage >= 12) mention = 'Assez Bien';
+    else if (report.semesterAverage >= 10) mention = 'Passable';
     page.drawText(mention, { x: 305, y: currentY - 24, size: 10, font: fontBold });
 
     // 8. Validation Credits Table (Multi-column)
@@ -510,10 +513,13 @@ ${body}
     const globalStats = await this.gradesService.getPromotionStats(semesterId);
     const semester = await this.prisma.semester.findUnique({ where: { id: semesterId } });
 
-    let mention = 'Passable';
+    // Mirrors calculateAnnualReport's mention scale (grades.service.ts) — an average below
+    // 10 gets no mention at all, it previously defaulted to "Passable" even for a failing grade.
+    let mention = 'Non attribuée';
     if (report.semesterAverage >= 16) mention = 'Très Bien';
     else if (report.semesterAverage >= 14) mention = 'Bien';
     else if (report.semesterAverage >= 12) mention = 'Assez Bien';
+    else if (report.semesterAverage >= 10) mention = 'Passable';
 
     const ueRows = report.report.map((ue, idx) => {
       const subjectRows = ue.subjects.map((subj: any) => `
@@ -1184,11 +1190,53 @@ ${body}
     return Buffer.from(buffer);
   }
 
-  async importStudentsFromExcel(buffer: Buffer) {
+  // Real data export (as opposed to generateTemplate, which is always a blank canvas) —
+  // used by the Classes module's "Exporter" button to download a class roster.
+  async generateStudentsXlsx(className?: string): Promise<Buffer> {
+    const students = await this.prisma.student.findMany({
+      where: className ? { class: className } : undefined,
+      include: { user: { select: { email: true } } },
+      orderBy: [{ lastName: 'asc' }, { firstName: 'asc' }],
+    });
+
+    const workbook = new ExcelJS.Workbook();
+    const worksheet = workbook.addWorksheet(className || 'Etudiants');
+    worksheet.columns = [
+      { header: 'MATRICULE', key: 'studentId', width: 20 },
+      { header: 'NOM', key: 'lastName', width: 22 },
+      { header: 'PRÉNOM', key: 'firstName', width: 22 },
+      { header: 'EMAIL', key: 'email', width: 32 },
+      { header: 'CLASSE', key: 'class', width: 15 },
+      { header: 'DATE_NAISSANCE', key: 'birthDate', width: 18 },
+      { header: 'LIEU_NAISSANCE', key: 'birthPlace', width: 20 },
+      { header: 'TYPE_BAC', key: 'bacType', width: 12 },
+      { header: 'ÉTABLISSEMENT_ORIGINE', key: 'provenance', width: 30 },
+    ];
+
+    for (const s of students) {
+      worksheet.addRow({
+        studentId: s.studentId,
+        lastName: s.lastName,
+        firstName: s.firstName,
+        email: s.user?.email ?? '',
+        class: s.class,
+        birthDate: s.birthDate ? new Date(s.birthDate).toISOString().slice(0, 10) : '',
+        birthPlace: s.birthPlace ?? '',
+        bacType: s.bacType ?? '',
+        provenance: s.provenance ?? '',
+      });
+    }
+
+    this.styleTemplateHeaderRow(worksheet);
+    const buffer = await workbook.xlsx.writeBuffer();
+    return Buffer.from(buffer);
+  }
+
+  async importStudentsFromExcel(buffer: Buffer, defaultClass?: string) {
     const workbook = new ExcelJS.Workbook();
     await workbook.xlsx.load(buffer as any);
     const worksheet = workbook.getWorksheet(1);
-    
+
     if (!worksheet) throw new NotFoundException('Worksheet not found');
 
     let count = 0;
@@ -1198,7 +1246,9 @@ ${body}
         const lastName = row.getCell(2).toString();
         const firstName = row.getCell(3).toString();
         const email = row.getCell(4).toString();
-        const className = row.getCell(5).toString();
+        // Importing from a specific class's page (defaultClass set) lets the CLASSE column
+        // be left blank — every row then falls into that class instead of the generic default.
+        const className = row.getCell(5).toString().trim() || defaultClass || '';
         const birthDateStr = row.getCell(6).toString();
         const birthPlace = row.getCell(7).toString();
         const bacType = row.getCell(8).toString();

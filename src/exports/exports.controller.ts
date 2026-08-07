@@ -288,7 +288,26 @@ export class ExportsController {
       },
     },
   })
-  async importStudents(@UploadedFile() file: Express.Multer.File) {
-    return this.exportsService.importStudentsFromExcel(file.buffer);
+  async importStudents(
+    @UploadedFile() file: Express.Multer.File,
+    @Query('defaultClass') defaultClass: string,
+  ) {
+    return this.exportsService.importStudentsFromExcel(file.buffer, defaultClass);
+  }
+
+  @Get('students')
+  @Roles(Role.ADMIN, Role.SECRETARY)
+  @ApiOperation({ summary: 'Download the student roster (optionally filtered by class) as XLSX' })
+  async downloadStudentsXlsx(
+    @Query('class') className: string,
+    @Res() res: Response,
+  ) {
+    const buffer = await this.exportsService.generateStudentsXlsx(className);
+    const safeName = (className || 'tous').replace(/[^a-zA-Z0-9]+/g, '_');
+    res.set({
+      'Content-Type': 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
+      'Content-Disposition': `attachment; filename=etudiants_${safeName}.xlsx`,
+    });
+    res.end(buffer);
   }
 }
