@@ -41,8 +41,12 @@ export class ExportsService {
     // Avg box → rank/mention → validation table → stats → decision → signature → disclaimer.
     // Reused below in the post-loop ensureSpace() call so the two stay consistent by construction.
     const FOOTER_RESERVE = 256;
-    const availableForTable = (PAGE_SIZE[1] - TOP_MARGIN - BOTTOM_MARGIN) - HEADER_RESERVE - FOOTER_RESERVE;
-    const ROW_H = Math.max(7, Math.min(14, totalTableRows > 0 ? availableForTable / totalTableRows : 14));
+    // Extra slack on top of the two reserves above: the row budget is intentionally
+    // computed a bit conservatively (rather than an exact-fit calculation) so small
+    // rounding differences never tip a bulletin onto an unnecessary 2nd page.
+    const SAFETY_MARGIN = 30;
+    const availableForTable = (PAGE_SIZE[1] - TOP_MARGIN - BOTTOM_MARGIN) - HEADER_RESERVE - FOOTER_RESERVE - SAFETY_MARGIN;
+    const ROW_H = Math.max(7, Math.min(13, totalTableRows > 0 ? availableForTable / totalTableRows : 13));
     const rowFontNormal = Math.max(5, Math.min(7, Math.round(ROW_H * 0.5)));
     const rowFontBold = Math.max(6, Math.min(8, Math.round(ROW_H * 0.57)));
     const rowTextOffset = ROW_H * 0.71;
