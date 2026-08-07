@@ -261,9 +261,10 @@ export class ExportsController {
   @ApiOperation({ summary: 'Download an adaptive Excel template for Students or Grades' })
   async getTemplate(
     @Param('type') type: 'STUDENTS' | 'GRADES',
+    @Query('semesterId') semesterId: string,
     @Res() res: Response,
   ) {
-    const buffer = await this.exportsService.generateTemplate(type);
+    const buffer = await this.exportsService.generateTemplate(type, semesterId);
     
     res.set({
       'Content-Type': 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',

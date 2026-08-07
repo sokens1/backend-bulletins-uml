@@ -290,234 +290,160 @@ export class GradesService {
   }
 
   async calculateStudentReport(studentId: string, semesterId: string) {
-    const rules = await this.getRulesSettings();
     const student = await this.findStudent(studentId);
-    const actualStudentId = student.id;
+    const { reportsByStudentId } = await this.computeSemesterReports(semesterId);
+    const report = reportsByStudentId.get(student.id);
+    if (!report) throw new NotFoundException('Student profile not found');
+    return report;
+  }
 
+  // Batch-computes every student's semester report (per-UE averages, credits, status, rank)
+  // in a handful of bulk queries instead of one DB round-trip per student. Calling
+  // calculateStudentReport in a loop used to be O(n²) (each call re-ranked against every
+  // other student from scratch) — that's what made bulk bulletin downloads time out.
+  async computeSemesterReports(semesterId: string) {
+    const rules = await this.getRulesSettings();
+    const students = await this.prisma.student.findMany({ include: { user: true } });
     const ues = await this.prisma.uE.findMany({
       where: { semesterId },
       include: {
         subjects: {
           include: {
-            grades: { where: { studentId: actualStudentId } },
-            attendances: { where: { studentId: actualStudentId } },
+            grades: true,
+            attendances: true,
           },
         },
       },
     });
 
-    let totalSemesterPoints = 0;
-    let totalSemesterCredits = 0;
+    const buildReport = (studentId: string) => {
+      let totalSemesterPoints = 0;
+      let totalSemesterCredits = 0;
 
-    const ueReports = ues.map((ue) => {
-      let totalUEPoints = 0;
-      let totalUECoeff = 0;
+      const ueReports = ues.map((ue) => {
+        let totalUEPoints = 0;
+        let totalUECoeff = 0;
 
-      const subjectReports = ue.subjects.map((subject) => {
-        const grade = subject.grades[0];
+        const subjectReports = ue.subjects.map((subject) => {
+          const grade = subject.grades.find((g) => g.studentId === studentId);
+          const totalAbsences = subject.attendances
+            .filter((a) => a.studentId === studentId)
+            .reduce((acc, curr) => acc + curr.hoursAbsent, 0);
 
-        const totalAbsences = subject.attendances.reduce((acc, curr) => acc + curr.hoursAbsent, 0);
+          if (!grade) {
+            return { subject: subject.name, average: 0, status: 'NOT_GRADED', credits: subject.credits, coefficient: subject.coefficient, absences: totalAbsences };
+          }
 
-        if (!grade) {
-          return { subject: subject.name, average: 0, status: 'NOT_GRADED', credits: subject.credits, coefficient: subject.coefficient, absences: totalAbsences };
-        }
+          const average = this.computeSubjectAverage(
+            grade,
+            subject.ccWeight ?? 0.4,
+            subject.examWeight ?? 0.6,
+            totalAbsences,
+            rules.absencePenaltyPerHour
+          );
 
-        const average = this.computeSubjectAverage(
-          grade,
-          subject.ccWeight ?? 0.4,
-          subject.examWeight ?? 0.6,
-          totalAbsences,
-          rules.absencePenaltyPerHour
-        );
+          totalUEPoints += average * subject.coefficient;
+          totalUECoeff += subject.coefficient;
 
-        totalUEPoints += average * subject.coefficient;
-        totalUECoeff += subject.coefficient;
+          return {
+            subject: subject.name,
+            average: parseFloat(average.toFixed(2)),
+            credits: subject.credits,
+            coefficient: subject.coefficient,
+            grade,
+            absences: totalAbsences,
+          };
+        });
+
+        const ueAverage = totalUECoeff > 0 ? totalUEPoints / totalUECoeff : 0;
+        totalSemesterPoints += ueAverage * ue.credits;
+        totalSemesterCredits += ue.credits;
 
         return {
-          subject: subject.name,
-          average: parseFloat(average.toFixed(2)),
-          credits: subject.credits,
-          coefficient: subject.coefficient,
-          grade,
-          absences: totalAbsences,
+          ueName: ue.name,
+          ueCode: ue.code,
+          average: parseFloat(ueAverage.toFixed(2)),
+          creditsExpected: ue.credits,
+          subjects: subjectReports,
         };
       });
 
-      const ueAverage = totalUECoeff > 0 ? totalUEPoints / totalUECoeff : 0;
-      totalSemesterPoints += ueAverage * ue.credits;
-      totalSemesterCredits += ue.credits;
+      const semesterAverage = totalSemesterCredits > 0 ? totalSemesterPoints / totalSemesterCredits : 0;
 
-      return {
-        ueName: ue.name,
-        ueCode: ue.code,
-        average: parseFloat(ueAverage.toFixed(2)),
-        creditsExpected: ue.credits,
-        subjects: subjectReports,
-      };
-    });
+      // Detailed acquisition status
+      const finalReport = ueReports.map((ue) => {
+        let status = 'UE non Acquise';
+        let creditsWon = 0;
 
-    const semesterAverage = totalSemesterCredits > 0 ? totalSemesterPoints / totalSemesterCredits : 0;
-    
-    // Detailed acquisition status
-    const finalReport = ueReports.map((ue) => {
-      let status = 'UE non Acquise';
-      let creditsWon = 0;
+        if (ue.average >= 10) {
+          status = 'UE Acquise';
+          creditsWon = ue.creditsExpected;
+        } else if (semesterAverage >= 10) {
+          status = 'UE Acquise par Compensation';
+          creditsWon = ue.creditsExpected;
+        }
 
-      if (ue.average >= 10) {
-        status = 'UE Acquise';
-        creditsWon = ue.creditsExpected;
-      } else if (semesterAverage >= 10) {
-        status = 'UE Acquise par Compensation';
-        creditsWon = ue.creditsExpected;
-      }
-
-      return { ...ue, status, creditsWon };
-    });
-
-    const totalCreditsWon = finalReport.reduce((acc, curr) => acc + curr.creditsWon, 0);
-    const isSemesterValidated = totalCreditsWon >= totalSemesterCredits;
-
-    // Rank calculation
-    const rankData = await this.getStudentRank(actualStudentId, semesterId, parseFloat(semesterAverage.toFixed(2)));
-
-    // Fetch user info for name
-    const studentWithUser = await this.prisma.student.findUnique({
-      where: { id: actualStudentId },
-      include: { user: true }
-    });
-
-    if (!studentWithUser) throw new NotFoundException('Student profile not found');
-
-    const hasCompensatedUE = finalReport.some(ue => ue.average < 10 && ue.creditsWon > 0);
-    const semesterStatus = isSemesterValidated
-      ? (hasCompensatedUE ? 'Semestre validé par compensation' : 'Semestre validé')
-      : 'Semestre non validé';
-    // Mirrors the "UE Acquise / UE Acquise par Compensation / UE non Acquise" wording
-    // used per-UE, for the "Etat de la Validation des Crédits" summary cell.
-    const creditValidationStatus = isSemesterValidated
-      ? (hasCompensatedUE ? 'Semestre Acquis par Compensation' : 'Semestre Acquis')
-      : 'Semestre non Acquis';
-
-    return {
-      student: studentWithUser,
-      semesterId,
-      semesterAverage: parseFloat(semesterAverage.toFixed(2)),
-      report: finalReport,
-      totalCreditsWon,
-      totalCreditsExpected: totalSemesterCredits,
-      rank: rankData.rank,
-      totalStudents: rankData.total,
-      status: semesterStatus,
-      creditValidationStatus,
-    };
-  }
-
-  private async getStudentRank(studentId: string, semesterId: string, currentAvg: number) {
-    const students = await this.prisma.student.findMany();
-    const averages = await Promise.all(
-      students.map(async (s) => {
-        const report = await this.calculateStudentReportRaw(s.id, semesterId);
-        return { id: s.id, avg: report };
-      }),
-    );
-
-    const sorted = averages.sort((a, b) => b.avg - a.avg);
-    const rank = sorted.findIndex((s) => s.id === studentId) + 1;
-    
-    return { rank, total: students.length };
-  }
-
-  // Raw calculation to avoid recursion
-  private async calculateStudentReportRaw(studentId: string, semesterId: string) {
-    const rules = await this.getRulesSettings();
-    const ues = await this.prisma.uE.findMany({
-      where: { semesterId },
-      include: {
-        subjects: {
-          include: {
-            grades: { where: { studentId } },
-            attendances: { where: { studentId } },
-          },
-        },
-      },
-    });
-
-    let totalSemesterPoints = 0;
-    let totalSemesterCredits = 0;
-
-    for (const ue of ues) {
-      let totalUEPoints = 0;
-      let totalUECoeff = 0;
-
-      for (const subj of ue.subjects) {
-        const grade = subj.grades[0];
-        if (!grade) continue;
-
-        const totalAbsences = subj.attendances.reduce((acc, curr) => acc + curr.hoursAbsent, 0);
-        const avg = this.computeSubjectAverage(grade, subj.ccWeight, subj.examWeight, totalAbsences, rules.absencePenaltyPerHour);
-        
-        totalUEPoints += avg * subj.coefficient;
-        totalUECoeff += subj.coefficient;
-      }
-
-      const ueAvg = totalUECoeff > 0 ? totalUEPoints / totalUECoeff : 0;
-      totalSemesterPoints += ueAvg * ue.credits;
-      totalSemesterCredits += ue.credits;
-    }
-
-    return totalSemesterCredits > 0 ? totalSemesterPoints / totalSemesterCredits : 0;
-  }
-
-  async getPromotionStats(semesterId: string) {
-    const students = await this.prisma.student.findMany({
-      include: { user: true }
-    });
-    
-    // Use the raw calculation to avoid the getStudentRank recursive chain
-    const studentAverages = await Promise.all(
-      students.map(async (s) => ({
-        id: s.id,
-        lastName: s.lastName,
-        firstName: s.firstName,
-        avg: await this.calculateStudentReportRaw(s.id, semesterId)
-      }))
-    );
-
-    const averages = studentAverages.map(s => s.avg);
-    const stdDev = this.computeStdDev(averages);
-
-    // Simplified subject stats calculation
-    const subjects = await this.prisma.subject.findMany({
-      where: { ue: { semesterId } },
-    });
-
-    // Instead of re-calculating everything, let's fetch all grades for this semester once
-    const allGrades = await this.prisma.grade.findMany({
-      where: { subject: { ue: { semesterId } } },
-      include: { subject: true }
-    });
-
-    const subjectStats = subjects.map((subj) => {
-      const subjGrades = allGrades.filter(g => g.subjectId === subj.id);
-      const subjAvgs = subjGrades.map(g => {
-        const avg = this.computeSubjectAverage(
-          g,
-          g.subject.ccWeight ?? 0.4,
-          g.subject.examWeight ?? 0.6,
-          // Since getPromotionStats doesn't fetch absences inside this simplified block, and to keep it fast,
-          // we might just pass 0 or actually fetch attendances if required for promotion stats. 
-          // For class average per subject it's acceptable if we omit penalty, but to be accurate we must include it.
-          // Wait, class average shouldn't be affected by individual absences ideally, or if it is, we need to fetch them.
-          // Let's pass 0 for now as it's just class stats per subject.
-          0, 
-          0
-        );
-        return avg;
+        return { ...ue, status, creditsWon };
       });
 
-      const avg = subjAvgs.length > 0 
-        ? subjAvgs.reduce((a, b) => a + b, 0) / subjAvgs.length 
-        : 0;
+      const totalCreditsWon = finalReport.reduce((acc, curr) => acc + curr.creditsWon, 0);
+      const isSemesterValidated = totalCreditsWon >= totalSemesterCredits;
+
+      const hasCompensatedUE = finalReport.some(ue => ue.average < 10 && ue.creditsWon > 0);
+      const semesterStatus = isSemesterValidated
+        ? (hasCompensatedUE ? 'Semestre validé par compensation' : 'Semestre validé')
+        : 'Semestre non validé';
+      // Mirrors the "UE Acquise / UE Acquise par Compensation / UE non Acquise" wording
+      // used per-UE, for the "Etat de la Validation des Crédits" summary cell.
+      const creditValidationStatus = isSemesterValidated
+        ? (hasCompensatedUE ? 'Semestre Acquis par Compensation' : 'Semestre Acquis')
+        : 'Semestre non Acquis';
+
+      return {
+        semesterAverage: parseFloat(semesterAverage.toFixed(2)),
+        report: finalReport,
+        totalCreditsWon,
+        totalCreditsExpected: totalSemesterCredits,
+        status: semesterStatus,
+        creditValidationStatus,
+      };
+    };
+
+    const rawReports = students.map((student) => ({ student, data: buildReport(student.id) }));
+    const ranked = [...rawReports].sort((a, b) => b.data.semesterAverage - a.data.semesterAverage);
+
+    const reportsByStudentId = new Map(
+      rawReports.map(({ student, data }) => [
+        student.id,
+        {
+          student,
+          semesterId,
+          ...data,
+          rank: ranked.findIndex((r) => r.student.id === student.id) + 1,
+          totalStudents: students.length,
+        },
+      ]),
+    );
+
+    return { reportsByStudentId, students, ues };
+  }
+
+  async getPromotionStats(
+    semesterId: string,
+    precomputed?: Awaited<ReturnType<GradesService['computeSemesterReports']>>,
+  ) {
+    const { reportsByStudentId, students, ues } = precomputed ?? (await this.computeSemesterReports(semesterId));
+    const reports = [...reportsByStudentId.values()];
+    const averages = reports.map((r) => r.semesterAverage);
+    const stdDev = this.computeStdDev(averages);
+
+    const subjectStats = ues.flatMap((ue) => ue.subjects).map((subj) => {
+      // Class-wide subject average is intentionally computed without the per-student
+      // absence penalty (0, 0) — it reflects raw academic performance across the class.
+      const subjAvgs = subj.grades.map((g) =>
+        this.computeSubjectAverage(g, subj.ccWeight ?? 0.4, subj.examWeight ?? 0.6, 0, 0),
+      );
+      const avg = subjAvgs.length > 0 ? subjAvgs.reduce((a, b) => a + b, 0) / subjAvgs.length : 0;
 
       return {
         subjectName: subj.name,
@@ -532,22 +458,17 @@ export class GradesService {
       stdDev: parseFloat(stdDev.toFixed(2)),
       count: students.length,
       subjectStats,
-      studentResults: await Promise.all(studentAverages.map(async (s) => {
-        // We calculate the full report but we'll optimize calculateStudentReport later if needed.
-        // For now, let's just make sure it's correct.
-        const report = await this.calculateStudentReport(s.id, semesterId);
-        return {
-          studentId: s.id,
-          student: {
-            id: s.id,
-            firstName: s.firstName,
-            lastName: s.lastName,
-          },
-          semesterAverage: report.semesterAverage,
-          rank: report.rank,
-          totalCreditsWon: report.totalCreditsWon,
-          status: report.status,
-        };
+      studentResults: reports.map((r) => ({
+        studentId: r.student.id,
+        student: {
+          id: r.student.id,
+          firstName: r.student.firstName,
+          lastName: r.student.lastName,
+        },
+        semesterAverage: r.semesterAverage,
+        rank: r.rank,
+        totalCreditsWon: r.totalCreditsWon,
+        status: r.status,
       })),
     };
   }

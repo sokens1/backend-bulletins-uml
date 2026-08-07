@@ -23,7 +23,12 @@ export class ExportsService {
     }
     const globalStats = await this.gradesService.getPromotionStats(semesterId);
     const semester = await this.prisma.semester.findUnique({ where: { id: semesterId } });
+    return this.renderBulletinPdf(report as any, globalStats, semester);
+  }
 
+  // Pure rendering — takes already-computed report/stats so bulk exports can compute
+  // them once for the whole promotion instead of once per student (see generateAllBulletinsZip).
+  private async renderBulletinPdf(report: any, globalStats: any, semester: { name: string; year: string } | null): Promise<Buffer> {
     const pdfDoc = await PDFDocument.create();
     const PAGE_SIZE: [number, number] = [595.28, 841.89]; // A4
     const TOP_MARGIN = 30;
@@ -288,6 +293,16 @@ export class ExportsService {
       where: { year },
       orderBy: { name: 'asc' },
     });
+    return this.renderAnnualBulletinPdf(annualReport as any, globalStats, year, semesters);
+  }
+
+  // Pure rendering — see renderBulletinPdf for why this is split out.
+  private async renderAnnualBulletinPdf(
+    annualReport: any,
+    globalStats: any,
+    year: string,
+    semesters: { id: string; name: string }[],
+  ): Promise<Buffer> {
     const semesterNameById = new Map(semesters.map((s) => [s.id, s.name]));
 
     const pdfDoc = await PDFDocument.create();
@@ -600,9 +615,8 @@ ${body}
       orderBy: { lastName: 'asc' },
     });
 
-    const reports = await Promise.all(
-      students.map((s) => this.gradesService.calculateStudentReport(s.id, semesterId))
-    );
+    const { reportsByStudentId } = await this.gradesService.computeSemesterReports(semesterId);
+    const reports = students.map((s) => reportsByStudentId.get(s.id)).filter((r): r is NonNullable<typeof r> => !!r);
 
     const workbook = new ExcelJS.Workbook();
     const worksheet = workbook.addWorksheet(`Promotion - ${semester.name}`);
@@ -801,11 +815,49 @@ ${body}
     return Buffer.from(buffer);
   }
 
-  async generateAllBulletinsZip(semesterId: string): Promise<Buffer> {
+  // Computes the shared per-promotion data (every student's report + class stats) ONCE,
+  // then renders each bulletin from that in-memory data — instead of each bulletin
+  // re-querying and re-ranking the whole class from scratch (was O(n²) DB work, the
+  // reason bulk downloads used to time out for anything but a handful of students).
+  private async renderAllBulletinsForSemester(semesterId: string): Promise<{ student: { lastName: string; firstName: string; studentId: string; id: string }; pdf: Buffer }[]> {
+    const semesterData = await this.gradesService.computeSemesterReports(semesterId);
+    const globalStats = await this.gradesService.getPromotionStats(semesterId, semesterData);
     const semester = await this.prisma.semester.findUnique({ where: { id: semesterId } });
-    const students = await this.prisma.student.findMany({ orderBy: [{ lastName: 'asc' }] });
 
-    return new Promise<Buffer>(async (resolve, reject) => {
+    const results: { student: { lastName: string; firstName: string; studentId: string; id: string }; pdf: Buffer }[] = [];
+    for (const student of semesterData.students) {
+      const report = semesterData.reportsByStudentId.get(student.id);
+      if (!report) continue;
+      try {
+        const pdf = await this.renderBulletinPdf(report as any, globalStats, semester);
+        results.push({ student, pdf });
+      } catch {
+        // ignore rendering failures for individual students (e.g. incomplete data)
+      }
+    }
+    return results;
+  }
+
+  private async renderAllAnnualBulletinsForYear(year: string): Promise<{ student: { lastName: string; firstName: string; studentId: string; id: string }; pdf: Buffer }[]> {
+    const students = await this.prisma.student.findMany({ orderBy: [{ lastName: 'asc' }] });
+    const globalStats = await this.gradesService.getAnnualPromotionStats(year);
+    const semesters = await this.prisma.semester.findMany({ where: { year }, orderBy: { name: 'asc' } });
+
+    const results: { student: { lastName: string; firstName: string; studentId: string; id: string }; pdf: Buffer }[] = [];
+    for (const student of students) {
+      try {
+        const annualReport = await this.gradesService.calculateAnnualReport(student.id, year);
+        const pdf = await this.renderAnnualBulletinPdf(annualReport as any, globalStats, year, semesters);
+        results.push({ student, pdf });
+      } catch {
+        // ignore missing data or errors for individual students
+      }
+    }
+    return results;
+  }
+
+  private zipPdfs(entries: { student: { lastName: string; firstName: string; studentId: string; id: string }; pdf: Buffer }[], nameFor: (student: { lastName: string; firstName: string; studentId: string; id: string }) => string): Promise<Buffer> {
+    return new Promise<Buffer>((resolve, reject) => {
       const archive = archiver('zip', { zlib: { level: 9 } });
       const chunks: Buffer[] = [];
 
@@ -817,47 +869,27 @@ ${body}
       archive.on('error', (err) => reject(err));
       archive.on('end', () => resolve(Buffer.concat(chunks)));
 
-      for (const s of students) {
-        try {
-          const pdf = await this.generateBulletinPdf(s.id, semesterId);
-          const safeName = `${(s.lastName || '').toUpperCase()}_${(s.firstName || '').toUpperCase()}_${s.studentId || s.id}`.replace(/[^a-zA-Z0-9_]+/g, '_');
-          archive.append(pdf, { name: `bulletin_${semester?.name || 'SEM'}_${safeName}.pdf` });
-        } catch {
-          // ignore missing data
-        }
+      for (const { student, pdf } of entries) {
+        archive.append(pdf, { name: nameFor(student) });
       }
 
       archive.finalize();
     });
   }
 
+  private safeStudentName(s: { lastName: string; firstName: string; studentId: string; id: string }): string {
+    return `${(s.lastName || '').toUpperCase()}_${(s.firstName || '').toUpperCase()}_${s.studentId || s.id}`.replace(/[^a-zA-Z0-9_]+/g, '_');
+  }
+
+  async generateAllBulletinsZip(semesterId: string): Promise<Buffer> {
+    const semester = await this.prisma.semester.findUnique({ where: { id: semesterId } });
+    const entries = await this.renderAllBulletinsForSemester(semesterId);
+    return this.zipPdfs(entries, (s) => `bulletin_${semester?.name || 'SEM'}_${this.safeStudentName(s)}.pdf`);
+  }
+
   async generateAllAnnualBulletinsZip(year: string): Promise<Buffer> {
-    const students = await this.prisma.student.findMany({ orderBy: [{ lastName: 'asc' }] });
-
-    return new Promise<Buffer>(async (resolve, reject) => {
-      const archive = archiver('zip', { zlib: { level: 9 } });
-      const chunks: Buffer[] = [];
-
-      archive.on('data', (d) => chunks.push(Buffer.from(d)));
-      archive.on('warning', (err) => {
-        if ((err as any).code === 'ENOENT') return;
-        reject(err);
-      });
-      archive.on('error', (err) => reject(err));
-      archive.on('end', () => resolve(Buffer.concat(chunks)));
-
-      for (const s of students) {
-        try {
-          const pdf = await this.generateAnnualBulletinPdf(s.id, year);
-          const safeName = `${(s.lastName || '').toUpperCase()}_${(s.firstName || '').toUpperCase()}_${s.studentId || s.id}`.replace(/[^a-zA-Z0-9_]+/g, '_');
-          archive.append(pdf, { name: `bulletin_ANNUEL_${year}_${safeName}.pdf` });
-        } catch {
-          // ignore missing data or errors for individual students
-        }
-      }
-
-      archive.finalize();
-    });
+    const entries = await this.renderAllAnnualBulletinsForYear(year);
+    return this.zipPdfs(entries, (s) => `bulletin_ANNUEL_${year}_${this.safeStudentName(s)}.pdf`);
   }
 
   private async mergePdfBuffers(buffers: Buffer[]): Promise<Buffer> {
@@ -872,33 +904,13 @@ ${body}
   }
 
   async generateAllBulletinsSinglePdf(semesterId: string): Promise<Buffer> {
-    const students = await this.prisma.student.findMany({ orderBy: [{ lastName: 'asc' }] });
-    const buffers: Buffer[] = [];
-
-    for (const s of students) {
-      try {
-        buffers.push(await this.generateBulletinPdf(s.id, semesterId));
-      } catch {
-        // ignore missing data
-      }
-    }
-
-    return this.mergePdfBuffers(buffers);
+    const entries = await this.renderAllBulletinsForSemester(semesterId);
+    return this.mergePdfBuffers(entries.map((e) => e.pdf));
   }
 
   async generateAllAnnualBulletinsSinglePdf(year: string): Promise<Buffer> {
-    const students = await this.prisma.student.findMany({ orderBy: [{ lastName: 'asc' }] });
-    const buffers: Buffer[] = [];
-
-    for (const s of students) {
-      try {
-        buffers.push(await this.generateAnnualBulletinPdf(s.id, year));
-      } catch {
-        // ignore missing data or errors for individual students
-      }
-    }
-
-    return this.mergePdfBuffers(buffers);
+    const entries = await this.renderAllAnnualBulletinsForYear(year);
+    return this.mergePdfBuffers(entries.map((e) => e.pdf));
   }
 
   // Trims, collapses internal whitespace and lower-cases so "Anglais  technique " and
@@ -940,11 +952,12 @@ ${body}
     const errors: string[] = [];
     for (let i = 2; i <= worksheet.rowCount; i++) {
         const row = worksheet.getRow(i);
+        // Columns: MATRICULE, NOM, PRÉNOM (both display-only, ignored here), MATIERE, NOTE_CC, NOTE_EXAMEN, NOTE_RATTRAPAGE.
         const studentRef = row.getCell(1).toString().trim();
-        const subjectRef = row.getCell(2).toString().trim();
-        const ccRaw = row.getCell(3).toString().trim();
-        const examRaw = row.getCell(4).toString().trim();
-        const rattrRaw = row.getCell(5).toString().trim();
+        const subjectRef = row.getCell(4).toString().trim();
+        const ccRaw = row.getCell(5).toString().trim();
+        const examRaw = row.getCell(6).toString().trim();
+        const rattrRaw = row.getCell(7).toString().trim();
 
         if (!studentRef || !subjectRef) {
           skipped++;
@@ -988,7 +1001,7 @@ ${body}
     return { imported: count, skipped, errors };
   }
 
-  async generateTemplate(type: 'STUDENTS' | 'GRADES'): Promise<Buffer> {
+  async generateTemplate(type: 'STUDENTS' | 'GRADES', semesterId?: string): Promise<Buffer> {
     const workbook = new ExcelJS.Workbook();
     const worksheet = workbook.addWorksheet('Template');
 
@@ -1020,37 +1033,61 @@ ${body}
       });
     } else {
       worksheet.columns = [
-        { header: 'STUDENT_ID (ou Matricule)', key: 'studentId', width: 25 },
-        { header: 'SUBJECT_ID (Libellé exact de la matière)', key: 'subjectId', width: 38 },
+        { header: 'MATRICULE', key: 'studentId', width: 20 },
+        { header: 'NOM', key: 'lastName', width: 22 },
+        { header: 'PRÉNOM', key: 'firstName', width: 22 },
+        { header: 'MATIERE', key: 'subjectId', width: 38 },
         { header: 'NOTE_CC (/20)', key: 'ccGrade', width: 15 },
         { header: 'NOTE_EXAMEN (/20)', key: 'examGrade', width: 15 },
         { header: 'NOTE_RATTRAPAGE (/20)', key: 'rattrapageGrade', width: 20 },
       ];
-      worksheet.getCell('B1').note =
-        "Doit correspondre au libellé exact de la matière tel que créé dans l'application pour ce semestre " +
-        '(la casse et les espaces superflus sont tolérés, mais pas les fautes de frappe). ' +
-        "Vous pouvez aussi indiquer l'identifiant technique (SUBJECT_ID) de la matière.";
-      worksheet.addRow({
-          studentId: 'INPTIC-2024-001',
-          subjectId: 'Anglais technique',
-          ccGrade: 14.5,
-          examGrade: 12,
-          rattrapageGrade: ''
-      });
-      worksheet.addRow({
-          studentId: 'INPTIC-2024-001',
-          subjectId: 'Communication',
-          ccGrade: 11.8,
-          examGrade: 11.8,
-          rattrapageGrade: ''
-      });
-      worksheet.addRow({
-          studentId: 'INPTIC-2024-002',
-          subjectId: 'Anglais technique',
-          ccGrade: 9,
-          examGrade: 8,
-          rattrapageGrade: 11
-      });
+      worksheet.getCell('A1').note =
+        'MATRICULE, NOM, PRÉNOM et MATIERE sont pré-remplis automatiquement à partir des étudiants et ' +
+        'matières déjà enregistrés pour ce semestre — il ne reste plus qu\'à saisir les notes. ' +
+        'Ne modifiez pas la colonne MATIERE : elle sert à retrouver la matière lors de l\'import.';
+
+      const students = semesterId
+        ? await this.prisma.student.findMany({ orderBy: [{ lastName: 'asc' }, { firstName: 'asc' }] })
+        : [];
+      const subjects = semesterId
+        ? await this.prisma.subject.findMany({
+            where: { ue: { semesterId } },
+            include: { ue: true },
+            orderBy: [{ ue: { name: 'asc' } }, { name: 'asc' }],
+          })
+        : [];
+
+      if (semesterId && subjects.length === 0) {
+        worksheet.addRow({
+          studentId: '',
+          lastName: '',
+          firstName: '',
+          subjectId: 'Aucune matière enregistrée pour ce semestre — créez-les dans Gestion académique avant d\'importer des notes.',
+          ccGrade: '',
+          examGrade: '',
+          rattrapageGrade: '',
+        });
+      } else if (semesterId) {
+        for (const student of students) {
+          for (const subject of subjects) {
+            worksheet.addRow({
+              studentId: student.studentId,
+              lastName: student.lastName,
+              firstName: student.firstName,
+              subjectId: subject.name,
+              ccGrade: '',
+              examGrade: '',
+              rattrapageGrade: '',
+            });
+          }
+        }
+      } else {
+        // Generic fallback sample when no semester context is available.
+        worksheet.addRow({
+          studentId: 'INPTIC-2024-001', lastName: 'DUPONT', firstName: 'Jean',
+          subjectId: 'Anglais technique', ccGrade: 14.5, examGrade: 12, rattrapageGrade: '',
+        });
+      }
     }
 
     // Styling headers
