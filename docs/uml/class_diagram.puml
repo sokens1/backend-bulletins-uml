@@ -1,7 +1,7 @@
 @startuml
-' Kept in sync with prisma/schema.prisma — regenerate by hand whenever a model changes.
+' Synchronisé avec prisma/schema.prisma — à régénérer manuellement à chaque modification d'un modèle.
 
-package "Entities" {
+package "Entités" {
   enum Role {
     ADMIN
     TEACHER
@@ -111,25 +111,25 @@ User "1" -- "0..1" Teacher
 User "1" -- "many" AuditLog
 Semester "1" *-- "many" UE
 UE "1" *-- "many" Subject
-Teacher "1" -- "many" Subject : teaches
+Teacher "1" -- "many" Subject : enseigne
 Student "1" -- "many" Grade
 Subject "1" -- "many" Grade
 Student "1" -- "many" Attendance
 Subject "1" -- "many" Attendance
 
 note bottom of Class
-  Standalone reference list (name only), used to
-  populate dropdowns. Student.class is a free-text
-  field, not a foreign key to Class — the two are
-  kept in sync by the application, not by the schema.
+  Liste de référence autonome (nom uniquement), utilisée pour
+  alimenter les listes déroulantes. Student.class est un champ
+  texte libre, pas une clé étrangère vers Class — les deux sont
+  synchronisés par l'application, pas par le schéma.
 end note
 
 note bottom of AcademicYear
-  Same pattern as Class: Semester.year is a free-text
-  field, not a foreign key to AcademicYear.
+  Même logique que pour Class : Semester.year est un champ
+  texte libre, pas une clé étrangère vers AcademicYear.
 end note
 
-package "NestJS Services" {
+package "Services NestJS" {
   class AuthService
   class UsersService
   class AcademicService
@@ -138,18 +138,18 @@ package "NestJS Services" {
   class SettingsService
 }
 
-AuthService ..> "authenticates" User
-UsersService ..> "manages" User
-UsersService ..> "manages" Student
-UsersService ..> "manages" Teacher
-AcademicService ..> "manages" Semester
-AcademicService ..> "manages" UE
-AcademicService ..> "manages" Subject
-AcademicService ..> "manages" Class
-AcademicService ..> "manages" AcademicYear
-GradesService ..> "computes averages from" Grade
-GradesService ..> "computes penalties from" Attendance
-ExportsService ..> "reads reports from" GradesService
-ExportsService ..> "imports/exports" Student
-ExportsService ..> "imports/exports" Grade
+AuthService ..> "authentifie" User
+UsersService ..> "gère" User
+UsersService ..> "gère" Student
+UsersService ..> "gère" Teacher
+AcademicService ..> "gère" Semester
+AcademicService ..> "gère" UE
+AcademicService ..> "gère" Subject
+AcademicService ..> "gère" Class
+AcademicService ..> "gère" AcademicYear
+GradesService ..> "calcule les moyennes à partir de" Grade
+GradesService ..> "calcule les pénalités à partir de" Attendance
+ExportsService ..> "lit les rapports depuis" GradesService
+ExportsService ..> "importe/exporte" Student
+ExportsService ..> "importe/exporte" Grade
 @enduml

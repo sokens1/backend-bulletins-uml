@@ -33,7 +33,19 @@ export class ExportsService {
     const PAGE_SIZE: [number, number] = [595.28, 841.89]; // A4
     const TOP_MARGIN = 30;
     const BOTTOM_MARGIN = 30;
-    const ROW_H = 14; // subject/UE row height — kept tight so a normal semester (~15-20 rows) fits on one page, like the reference bulletins
+    // Row height (and its dependent font sizes) shrink dynamically so a semester with many
+    // UEs/subjects still fits on a single page like the reference bulletins, instead of
+    // always spilling onto a 2nd page once a class has more than ~20 table rows.
+    const totalTableRows = (report.report as any[]).reduce((sum, ue) => sum + 2 + ue.subjects.length, 0);
+    const HEADER_RESERVE = 234; // institution header → student box, down to the table header — constant regardless of report content
+    // Avg box → rank/mention → validation table → stats → decision → signature → disclaimer.
+    // Reused below in the post-loop ensureSpace() call so the two stay consistent by construction.
+    const FOOTER_RESERVE = 256;
+    const availableForTable = (PAGE_SIZE[1] - TOP_MARGIN - BOTTOM_MARGIN) - HEADER_RESERVE - FOOTER_RESERVE;
+    const ROW_H = Math.max(7, Math.min(14, totalTableRows > 0 ? availableForTable / totalTableRows : 14));
+    const rowFontNormal = Math.max(5, Math.min(7, Math.round(ROW_H * 0.5)));
+    const rowFontBold = Math.max(6, Math.min(8, Math.round(ROW_H * 0.57)));
+    const rowTextOffset = ROW_H * 0.71;
     let page = pdfDoc.addPage(PAGE_SIZE);
     let { width, height } = page.getSize();
 
@@ -161,21 +173,21 @@ export class ExportsService {
       // UE Header row (UE5-1 style)
       ensureSpace(ROW_H, { redrawTableHeader: true, continuationLabel });
       page.drawRectangle({ x: 30, y: currentY - ROW_H, width: width - 60, height: ROW_H, color: rgb(0.97, 0.97, 0.97), borderColor: rgb(0,0,0), borderWidth: 0.5 });
-      page.drawText(`UE${semester?.name.substring(1) || '0'}-${report.report.indexOf(ue) + 1} : ${ue.ueName}`, { x: 35, y: currentY - 10, size: 8, font: fontBold, color: rgb(0, 0, 0.4) });
+      page.drawText(`UE${semester?.name.substring(1) || '0'}-${report.report.indexOf(ue) + 1} : ${ue.ueName}`, { x: 35, y: currentY - rowTextOffset, size: rowFontBold, font: fontBold, color: rgb(0, 0, 0.4) });
 
       currentY -= ROW_H;
 
       for (const subj of ue.subjects) {
         ensureSpace(ROW_H, { redrawTableHeader: true, continuationLabel });
         page.drawRectangle({ x: 30, y: currentY - ROW_H, width: width - 60, height: ROW_H, borderColor: rgb(0,0,0), borderWidth: 0.5 });
-        page.drawText(subj.subject.substring(0, 48), { x: 35, y: currentY - 10, size: 7, font: fontNormal });
-        page.drawText(subj.credits?.toString() || '-', { x: cols.credits + 10, y: currentY - 10, size: 7, font: fontNormal });
-        page.drawText(Number(subj.coefficient ?? 1).toFixed(2).replace('.', ','), { x: cols.coeff + 10, y: currentY - 10, size: 7, font: fontNormal });
-        page.drawText(subj.absences > 0 ? subj.absences.toString() : '-', { x: cols.absences + 10, y: currentY - 10, size: 7, font: fontNormal, color: subj.absences > 0 ? rgb(0.8, 0, 0) : rgb(0,0,0) });
-        page.drawText(Number(subj.average ?? 0).toFixed(2).replace('.', ','), { x: cols.studentNote + 15, y: currentY - 10, size: 8, font: fontBold });
+        page.drawText(subj.subject.substring(0, 48), { x: 35, y: currentY - rowTextOffset, size: rowFontNormal, font: fontNormal });
+        page.drawText(subj.credits?.toString() || '-', { x: cols.credits + 10, y: currentY - rowTextOffset, size: rowFontNormal, font: fontNormal });
+        page.drawText(Number(subj.coefficient ?? 1).toFixed(2).replace('.', ','), { x: cols.coeff + 10, y: currentY - rowTextOffset, size: rowFontNormal, font: fontNormal });
+        page.drawText(subj.absences > 0 ? subj.absences.toString() : '-', { x: cols.absences + 10, y: currentY - rowTextOffset, size: rowFontNormal, font: fontNormal, color: subj.absences > 0 ? rgb(0.8, 0, 0) : rgb(0,0,0) });
+        page.drawText(Number(subj.average ?? 0).toFixed(2).replace('.', ','), { x: cols.studentNote + 15, y: currentY - rowTextOffset, size: rowFontBold, font: fontBold });
 
         const subjStat = globalStats.subjectStats.find(s => s.subjectName === subj.subject);
-        page.drawText(subjStat ? Number(subjStat.average ?? 0).toFixed(2).replace('.', ',') : '-', { x: cols.classAvg + 15, y: currentY - 10, size: 7, font: fontNormal });
+        page.drawText(subjStat ? Number(subjStat.average ?? 0).toFixed(2).replace('.', ',') : '-', { x: cols.classAvg + 15, y: currentY - rowTextOffset, size: rowFontNormal, font: fontNormal });
 
         // Vertical lines for subject row
         [cols.credits - 5, cols.coeff - 5, cols.absences - 5, cols.studentNote - 10, cols.classAvg - 5].forEach(x => {
@@ -187,13 +199,13 @@ export class ExportsService {
       // UE Footer
       ensureSpace(ROW_H, { redrawTableHeader: true, continuationLabel });
       page.drawRectangle({ x: 30, y: currentY - ROW_H, width: width - 60, height: ROW_H, color: rgb(0.98, 0.98, 0.98), borderColor: rgb(0,0,0), borderWidth: 0.5 });
-      page.drawText(`Moyenne UE${semester?.name.substring(1) || '0'}-${report.report.indexOf(ue) + 1}`, { x: 130, y: currentY - 10, size: 8, font: fontBold, color: rgb(0, 0, 0.4) });
-      page.drawText(ue.creditsExpected.toString(), { x: cols.credits + 10, y: currentY - 10, size: 7, font: fontBold });
+      page.drawText(`Moyenne UE${semester?.name.substring(1) || '0'}-${report.report.indexOf(ue) + 1}`, { x: 130, y: currentY - rowTextOffset, size: rowFontBold, font: fontBold, color: rgb(0, 0, 0.4) });
+      page.drawText(ue.creditsExpected.toString(), { x: cols.credits + 10, y: currentY - rowTextOffset, size: rowFontNormal, font: fontBold });
 
       const totalUEAbsences = ue.subjects.reduce((sum, s) => sum + (s.absences || 0), 0);
-      page.drawText(totalUEAbsences > 0 ? totalUEAbsences.toString() : '-', { x: cols.absences + 10, y: currentY - 10, size: 7, font: fontBold, color: totalUEAbsences > 0 ? rgb(0.8, 0, 0) : rgb(0,0,0) });
+      page.drawText(totalUEAbsences > 0 ? totalUEAbsences.toString() : '-', { x: cols.absences + 10, y: currentY - rowTextOffset, size: rowFontNormal, font: fontBold, color: totalUEAbsences > 0 ? rgb(0.8, 0, 0) : rgb(0,0,0) });
 
-      page.drawText(Number(ue.average ?? 0).toFixed(2).replace('.', ','), { x: cols.studentNote + 15, y: currentY - 10, size: 8, font: fontBold, color: rgb(0, 0, 0.4) });
+      page.drawText(Number(ue.average ?? 0).toFixed(2).replace('.', ','), { x: cols.studentNote + 15, y: currentY - rowTextOffset, size: rowFontBold, font: fontBold, color: rgb(0, 0, 0.4) });
 
       // Vertical lines for footer row
       [cols.credits - 5, cols.coeff - 5, cols.absences - 5, cols.studentNote - 10, cols.classAvg - 5].forEach(x => {
@@ -204,7 +216,7 @@ export class ExportsService {
 
     // 6. Annual / Semester Average (Yellow Highlight)
     // Keep the whole summary block (avg box → signature → disclaimer) together on one page.
-    ensureSpace(260);
+    ensureSpace(FOOTER_RESERVE);
     currentY -= 16;
     const avgBoxWidth = 250;
     page.drawRectangle({ x: width - 30 - avgBoxWidth, y: currentY - 25, width: avgBoxWidth, height: 25, borderColor: rgb(0,0,0), borderWidth: 1.5 });
@@ -930,6 +942,11 @@ ${body}
     return { value };
   }
 
+  // Matches the "{Subject} — CC/EXAMEN/RATTRAPAGE" column headers produced by
+  // generateTemplate's pivot layout. Reading the header (rather than assuming fixed
+  // column positions) keeps import working even if columns get reordered in Excel.
+  private static readonly GRADE_COLUMN_HEADER = /^(.+?)\s*[—–-]\s*(CC|EXAMEN|RATTRAPAGE)\s*$/i;
+
   async importGradesFromExcel(buffer: Buffer, semesterId: string, userId: string) {
     const workbook = new ExcelJS.Workbook();
     await workbook.xlsx.load(buffer as any);
@@ -947,54 +964,85 @@ ${body}
     const subjectById = new Map(subjects.map((s) => [s.id, s]));
     const subjectByName = new Map(subjects.map((s) => [this.normalizeText(s.name), s]));
 
+    // Pivot layout: columns 1-3 are MATRICULE/NOM/PRÉNOM, everything after is a
+    // "{Subject} — CC/EXAMEN/RATTRAPAGE" triplet (one per subject, in any order).
+    const headerRow = worksheet.getRow(1);
+    const gradeColumns: { col: number; field: 'cc' | 'exam' | 'rattr'; subjectRef: string }[] = [];
+    for (let c = 4; c <= worksheet.columnCount; c++) {
+      const headerText = headerRow.getCell(c).toString().trim();
+      const match = headerText.match(ExportsService.GRADE_COLUMN_HEADER);
+      if (!match) continue;
+      const field = match[2].toUpperCase() === 'CC' ? 'cc' : match[2].toUpperCase() === 'EXAMEN' ? 'exam' : 'rattr';
+      gradeColumns.push({ col: c, field, subjectRef: match[1].trim() });
+    }
+
+    if (gradeColumns.length === 0) {
+      throw new NotFoundException(
+        "Aucune colonne de notes reconnue (attendu : \"Matière — CC\", \"Matière — EXAMEN\", \"Matière — RATTRAPAGE\"). " +
+        "Utilisez le canevas généré par l'application (bouton \"Canevas notes\").",
+      );
+    }
+
     let count = 0;
     let skipped = 0;
     const errors: string[] = [];
     for (let i = 2; i <= worksheet.rowCount; i++) {
         const row = worksheet.getRow(i);
-        // Columns: MATRICULE, NOM, PRÉNOM (both display-only, ignored here), MATIERE, NOTE_CC, NOTE_EXAMEN, NOTE_RATTRAPAGE.
         const studentRef = row.getCell(1).toString().trim();
-        const subjectRef = row.getCell(4).toString().trim();
-        const ccRaw = row.getCell(5).toString().trim();
-        const examRaw = row.getCell(6).toString().trim();
-        const rattrRaw = row.getCell(7).toString().trim();
 
-        if (!studentRef || !subjectRef) {
-          skipped++;
-          continue;
+        if (!studentRef) {
+          continue; // blank row
         }
 
         const student = studentById.get(studentRef) ?? studentByMatricule.get(this.normalizeText(studentRef));
-        const subject = subjectById.get(subjectRef) ?? subjectByName.get(this.normalizeText(subjectRef));
-
-        if (!student || !subject) {
+        if (!student) {
           skipped++;
-          errors.push(`Ligne ${i}: ${!student ? `étudiant introuvable ("${studentRef}")` : `matière introuvable pour ce semestre ("${subjectRef}")`}`);
+          errors.push(`Ligne ${i}: étudiant introuvable ("${studentRef}")`);
           continue;
         }
 
-        const cc = this.parseGradeCell(ccRaw, 'Note CC');
-        const exam = this.parseGradeCell(examRaw, 'Note Examen');
-        const rattr = this.parseGradeCell(rattrRaw, 'Note Rattrapage');
-        const rowErrors = [cc.error, exam.error, rattr.error].filter(Boolean);
-        if (rowErrors.length > 0) {
-          skipped++;
-          errors.push(`Ligne ${i} (${student.studentId}/${subject.name}): ${rowErrors.join(', ')}`);
-          continue;
+        // Group this row's CC/EXAMEN/RATTRAPAGE cells by subject; subjects left entirely
+        // blank for this student are simply skipped (not counted as an error).
+        const bySubject = new Map<string, { cc?: string; exam?: string; rattr?: string }>();
+        for (const { col, field, subjectRef } of gradeColumns) {
+          const raw = row.getCell(col).toString().trim();
+          if (raw === '') continue;
+          const entry = bySubject.get(subjectRef) ?? {};
+          entry[field] = raw;
+          bySubject.set(subjectRef, entry);
         }
 
-        try {
-          await this.gradesService.enterGrade({
-              studentId: student.id,
-              subjectId: subject.id,
-              ccGrade: cc.value,
-              examGrade: exam.value,
-              rattrapageGrade: rattr.value,
-          }, userId);
-          count++;
-        } catch (e) {
-          skipped++;
-          errors.push(`Ligne ${i} (${student.studentId}/${subject.name}): ${e instanceof Error ? e.message : 'erreur inconnue'}`);
+        for (const [subjectRef, values] of bySubject) {
+          const subject = subjectById.get(subjectRef) ?? subjectByName.get(this.normalizeText(subjectRef));
+          if (!subject) {
+            skipped++;
+            errors.push(`Ligne ${i} (${student.studentId}): matière introuvable pour ce semestre ("${subjectRef}")`);
+            continue;
+          }
+
+          const cc = this.parseGradeCell(values.cc ?? '', 'Note CC');
+          const exam = this.parseGradeCell(values.exam ?? '', 'Note Examen');
+          const rattr = this.parseGradeCell(values.rattr ?? '', 'Note Rattrapage');
+          const rowErrors = [cc.error, exam.error, rattr.error].filter(Boolean);
+          if (rowErrors.length > 0) {
+            skipped++;
+            errors.push(`Ligne ${i} (${student.studentId}/${subject.name}): ${rowErrors.join(', ')}`);
+            continue;
+          }
+
+          try {
+            await this.gradesService.enterGrade({
+                studentId: student.id,
+                subjectId: subject.id,
+                ccGrade: cc.value,
+                examGrade: exam.value,
+                rattrapageGrade: rattr.value,
+            }, userId);
+            count++;
+          } catch (e) {
+            skipped++;
+            errors.push(`Ligne ${i} (${student.studentId}/${subject.name}): ${e instanceof Error ? e.message : 'erreur inconnue'}`);
+          }
         }
     }
 
@@ -1032,23 +1080,15 @@ ${body}
           password: 'Password123'
       });
     } else {
-      worksheet.columns = [
+      // Pivot layout: one row per student, one CC/EXAMEN/RATTRAPAGE column triplet per
+      // subject — so neither the student nor the subject name is ever repeated (unlike
+      // a flat "one row per student×subject" sheet, which duplicates both on every line).
+      const columns: any[] = [
         { header: 'MATRICULE', key: 'studentId', width: 20 },
         { header: 'NOM', key: 'lastName', width: 22 },
         { header: 'PRÉNOM', key: 'firstName', width: 22 },
-        { header: 'MATIERE', key: 'subjectId', width: 38 },
-        { header: 'NOTE_CC (/20)', key: 'ccGrade', width: 15 },
-        { header: 'NOTE_EXAMEN (/20)', key: 'examGrade', width: 15 },
-        { header: 'NOTE_RATTRAPAGE (/20)', key: 'rattrapageGrade', width: 20 },
       ];
-      worksheet.getCell('A1').note =
-        'MATRICULE, NOM, PRÉNOM et MATIERE sont pré-remplis automatiquement à partir des étudiants et ' +
-        'matières déjà enregistrés pour ce semestre — il ne reste plus qu\'à saisir les notes. ' +
-        'Ne modifiez pas la colonne MATIERE : elle sert à retrouver la matière lors de l\'import.';
 
-      const students = semesterId
-        ? await this.prisma.student.findMany({ orderBy: [{ lastName: 'asc' }, { firstName: 'asc' }] })
-        : [];
       const subjects = semesterId
         ? await this.prisma.subject.findMany({
             where: { ue: { semesterId } },
@@ -1056,38 +1096,41 @@ ${body}
             orderBy: [{ ue: { name: 'asc' } }, { name: 'asc' }],
           })
         : [];
+      const students = semesterId
+        ? await this.prisma.student.findMany({ orderBy: [{ lastName: 'asc' }, { firstName: 'asc' }] })
+        : [];
+
+      const effectiveSubjects = subjects.length > 0 ? subjects : [{ id: 'sample', name: 'Anglais technique' } as any];
+      effectiveSubjects.forEach((subject, idx) => {
+        columns.push({ header: `${subject.name} — CC`, key: `s${idx}_cc`, width: 14 });
+        columns.push({ header: `${subject.name} — EXAMEN`, key: `s${idx}_exam`, width: 14 });
+        columns.push({ header: `${subject.name} — RATTRAPAGE`, key: `s${idx}_rattr`, width: 16 });
+      });
+      worksheet.columns = columns;
+
+      worksheet.getCell('A1').note =
+        'MATRICULE, NOM et PRÉNOM sont pré-remplis automatiquement, et chaque matière du semestre a ses ' +
+        'propres colonnes CC / EXAMEN / RATTRAPAGE — il ne reste qu\'à saisir les notes. ' +
+        'Ne modifiez pas les en-têtes de colonnes : ils servent à retrouver la matière lors de l\'import.';
 
       if (semesterId && subjects.length === 0) {
-        worksheet.addRow({
-          studentId: '',
-          lastName: '',
-          firstName: '',
-          subjectId: 'Aucune matière enregistrée pour ce semestre — créez-les dans Gestion académique avant d\'importer des notes.',
-          ccGrade: '',
-          examGrade: '',
-          rattrapageGrade: '',
-        });
+        worksheet.addRow({ studentId: '', lastName: '', firstName: '', s0_cc: 'Aucune matière enregistrée pour ce semestre — créez-les dans Gestion académique avant d\'importer des notes.' });
       } else if (semesterId) {
         for (const student of students) {
-          for (const subject of subjects) {
-            worksheet.addRow({
-              studentId: student.studentId,
-              lastName: student.lastName,
-              firstName: student.firstName,
-              subjectId: subject.name,
-              ccGrade: '',
-              examGrade: '',
-              rattrapageGrade: '',
-            });
-          }
+          const rowData: any = { studentId: student.studentId, lastName: student.lastName, firstName: student.firstName };
+          effectiveSubjects.forEach((_subject, idx) => {
+            rowData[`s${idx}_cc`] = '';
+            rowData[`s${idx}_exam`] = '';
+            rowData[`s${idx}_rattr`] = '';
+          });
+          worksheet.addRow(rowData);
         }
       } else {
         // Generic fallback sample when no semester context is available.
-        worksheet.addRow({
-          studentId: 'INPTIC-2024-001', lastName: 'DUPONT', firstName: 'Jean',
-          subjectId: 'Anglais technique', ccGrade: 14.5, examGrade: 12, rattrapageGrade: '',
-        });
+        worksheet.addRow({ studentId: 'INPTIC-2024-001', lastName: 'DUPONT', firstName: 'Jean', s0_cc: 14.5, s0_exam: 12, s0_rattr: '' });
       }
+
+      worksheet.views = [{ state: 'frozen', xSplit: 3, ySplit: 1 }];
     }
 
     // Styling headers
