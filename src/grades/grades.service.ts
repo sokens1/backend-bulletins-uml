@@ -389,9 +389,14 @@ export class GradesService {
     if (!studentWithUser) throw new NotFoundException('Student profile not found');
 
     const hasCompensatedUE = finalReport.some(ue => ue.average < 10 && ue.creditsWon > 0);
-    const semesterStatus = isSemesterValidated 
-      ? (hasCompensatedUE ? 'Semestre validé par compensation' : 'Semestre validé') 
+    const semesterStatus = isSemesterValidated
+      ? (hasCompensatedUE ? 'Semestre validé par compensation' : 'Semestre validé')
       : 'Semestre non validé';
+    // Mirrors the "UE Acquise / UE Acquise par Compensation / UE non Acquise" wording
+    // used per-UE, for the "Etat de la Validation des Crédits" summary cell.
+    const creditValidationStatus = isSemesterValidated
+      ? (hasCompensatedUE ? 'Semestre Acquis par Compensation' : 'Semestre Acquis')
+      : 'Semestre non Acquis';
 
     return {
       student: studentWithUser,
@@ -403,6 +408,7 @@ export class GradesService {
       rank: rankData.rank,
       totalStudents: rankData.total,
       status: semesterStatus,
+      creditValidationStatus,
     };
   }
 

@@ -1,4 +1,6 @@
 @startuml
+' Kept in sync with prisma/schema.prisma — regenerate by hand whenever a model changes.
+
 package "Entities" {
   enum Role {
     ADMIN
@@ -12,20 +14,41 @@ package "Entities" {
     +email: String
     +password: String
     +role: Role
+    +createdAt: DateTime
+    +updatedAt: DateTime
   }
 
   class Student {
     +id: String
+    +userId: String
     +studentId: String
     +firstName: String
     +lastName: String
     +class: String
+    +birthDate: DateTime?
+    +birthPlace: String?
+    +bacType: String?
+    +provenance: String?
   }
 
   class Teacher {
     +id: String
+    +userId: String
     +firstName: String
     +lastName: String
+  }
+
+  class Class {
+    +id: String
+    +name: String
+    +createdAt: DateTime
+  }
+
+  class AcademicYear {
+    +id: String
+    +label: String
+    +isActive: Boolean
+    +createdAt: DateTime
   }
 
   class Semester {
@@ -33,47 +56,100 @@ package "Entities" {
     +name: String
     +year: String
     +isActive: Boolean
+    +isLocked: Boolean
   }
 
   class UE {
     +id: String
+    +code: String?
     +name: String
     +credits: Int
+    +semesterId: String
   }
 
   class Subject {
     +id: String
     +name: String
     +coefficient: Float
+    +credits: Int
+    +ccWeight: Float
+    +examWeight: Float
+    +ueId: String
+    +teacherId: String?
   }
 
   class Grade {
-    +ccGrade: Float
-    +examGrade: Float
-    +rattrapageGrade: Float
+    +id: String
+    +ccGrade: Float?
+    +examGrade: Float?
+    +rattrapageGrade: Float?
+    +studentId: String
+    +subjectId: String
   }
 
   class Attendance {
+    +id: String
     +hoursAbsent: Int
+    +studentId: String
+    +subjectId: String
+  }
+
+  class AuditLog {
+    +id: String
+    +userId: String
+    +action: String
+    +entity: String
+    +entityId: String
+    +oldData: Json?
+    +newData: Json?
+    +timestamp: DateTime
   }
 }
 
 User "1" -- "0..1" Student
 User "1" -- "0..1" Teacher
+User "1" -- "many" AuditLog
 Semester "1" *-- "many" UE
 UE "1" *-- "many" Subject
-Teacher "1" -- "many" Subject
+Teacher "1" -- "many" Subject : teaches
 Student "1" -- "many" Grade
 Subject "1" -- "many" Grade
 Student "1" -- "many" Attendance
+Subject "1" -- "many" Attendance
+
+note bottom of Class
+  Standalone reference list (name only), used to
+  populate dropdowns. Student.class is a free-text
+  field, not a foreign key to Class — the two are
+  kept in sync by the application, not by the schema.
+end note
+
+note bottom of AcademicYear
+  Same pattern as Class: Semester.year is a free-text
+  field, not a foreign key to AcademicYear.
+end note
 
 package "NestJS Services" {
   class AuthService
+  class UsersService
   class AcademicService
   class GradesService
   class ExportsService
+  class SettingsService
 }
 
-GradesService ..> "Calculates" Grade
-ExportsService ..> "Uses" GradesService
+AuthService ..> "authenticates" User
+UsersService ..> "manages" User
+UsersService ..> "manages" Student
+UsersService ..> "manages" Teacher
+AcademicService ..> "manages" Semester
+AcademicService ..> "manages" UE
+AcademicService ..> "manages" Subject
+AcademicService ..> "manages" Class
+AcademicService ..> "manages" AcademicYear
+GradesService ..> "computes averages from" Grade
+GradesService ..> "computes penalties from" Attendance
+ExportsService ..> "reads reports from" GradesService
+ExportsService ..> "imports/exports" Student
+ExportsService ..> "imports/exports" Grade
 @enduml

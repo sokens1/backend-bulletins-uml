@@ -203,6 +203,38 @@ export class ExportsController {
     res.end(buffer);
   }
 
+  @Get('bulletins-pdf')
+  @Roles(Role.ADMIN, Role.SECRETARY)
+  @ApiOperation({ summary: 'Download all bulletins of a semester merged into a single PDF' })
+  async downloadAllBulletinsSinglePdf(
+    @Query('semesterId') semesterId: string,
+    @Res() res: Response,
+  ) {
+    const buffer = await this.exportsService.generateAllBulletinsSinglePdf(semesterId);
+    res.set({
+      'Content-Type': 'application/pdf',
+      'Content-Disposition': `attachment; filename=bulletins_${semesterId}.pdf`,
+      'Content-Length': buffer.length,
+    });
+    res.end(buffer);
+  }
+
+  @Get('bulletins-annual-pdf')
+  @Roles(Role.ADMIN, Role.SECRETARY)
+  @ApiOperation({ summary: 'Download all annual bulletins of a specific year merged into a single PDF' })
+  async downloadAllAnnualBulletinsSinglePdf(
+    @Query('year') year: string,
+    @Res() res: Response,
+  ) {
+    const buffer = await this.exportsService.generateAllAnnualBulletinsSinglePdf(year);
+    res.set({
+      'Content-Type': 'application/pdf',
+      'Content-Disposition': `attachment; filename=bulletins_annuels_${year.replace(/\s+/g, '_')}.pdf`,
+      'Content-Length': buffer.length,
+    });
+    res.end(buffer);
+  }
+
   @Post('import-grades')
   @Roles(Role.ADMIN, Role.SECRETARY)
   @UseInterceptors(FileInterceptor('file'))
