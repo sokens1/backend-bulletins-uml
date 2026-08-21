@@ -1510,6 +1510,69 @@ ${body}
     return Buffer.from(buffer);
   }
 
+  // Annual workbook combining S5 + S6 for a given academic year — "TabAnnuel" +
+  // "BulletinAnnuel" sheets, mirroring the per-semester TabNote/Bulletin pair above. The
+  // reference workbook's own "TabAnnuel" sheet is clean and directly usable as a structural
+  // model (per-UE Moyenne/Rang for each semester, then Moyenne S5/S6, Moyenne Générale,
+  // Rang Annuel, Total Crédits, Taux de validation, Décision du Jury, Mention); its
+  // "BullAnnuel"/"BullAnnuel (2)" sheets, however, are leftover artifacts from an entirely
+  // different program (USTM Ecole Polytechnique DUT, different institution/signatures, stray
+  // cross-sheet reference garbage) and aren't usable references — BulletinAnnuel below is
+  // instead built consistent with our own per-semester Bulletin sheet's design.
+  async generateAnnualTemplate(year: string): Promise<Buffer> {
+    const semesters = await this.prisma.semester.findMany({ where: { year }, orderBy: { name: 'asc' } });
+    const s5 = semesters.find((s) => s.name === 'S5');
+    const s6 = semesters.find((s) => s.name === 'S6');
+    if (!s5 || !s6) {
+      throw new NotFoundException(`Le bilan annuel requiert les semestres S5 et S6 pour l'année ${year}.`);
+    }
+
+    const students = await this.prisma.student.findMany({ orderBy: [{ lastName: 'asc' }, { firstName: 'asc' }] });
+    if (students.length === 0) {
+      const workbook = new ExcelJS.Workbook();
+      workbook.addWorksheet('TabAnnuel').addRow(['Aucun étudiant enregistré.']);
+      return Buffer.from(await workbook.xlsx.writeBuffer());
+    }
+
+    const { reportsByStudentId: s5Reports } = await this.gradesService.computeSemesterReports(s5.id);
+    const { reportsByStudentId: s6Reports } = await this.gradesService.computeSemesterReports(s6.id);
+
+    // Reuses calculateAnnualReport's own business rules (mention scale, jury decision
+    // including the "Reprise de soutenance" case) for the annual columns instead of
+    // duplicating that logic here — see grades.service.ts.
+    const annualStats = await this.gradesService.getAnnualPromotionStats(year);
+    const annualByStudentId = new Map(annualStats.studentResults.map((r) => [r.studentId, r]));
+
+    const workbook = new ExcelJS.Workbook();
+    const logoImageId = this.loadLogoImage(workbook);
+
+    const ueGroupsFor = (reports: typeof s5Reports) => {
+      const first = [...reports.values()][0];
+      return (first?.report ?? []).map((ue) => ({ ueName: ue.ueName, ueCode: ue.ueCode }));
+    };
+
+    this.buildTabAnnuelSheet(workbook, {
+      className: students[0]?.class,
+      year,
+      s5: { name: s5.name, ueGroups: ueGroupsFor(s5Reports), reports: s5Reports },
+      s6: { name: s6.name, ueGroups: ueGroupsFor(s6Reports), reports: s6Reports },
+      students: students as any,
+      annualByStudentId,
+      logoImageId,
+    });
+
+    this.buildBulletinAnnuelSheet(workbook, {
+      className: students[0]?.class,
+      year,
+      s5UeGroups: ueGroupsFor(s5Reports),
+      s6UeGroups: ueGroupsFor(s6Reports),
+      studentCount: students.length,
+      logoImageId,
+    });
+
+    return Buffer.from(await workbook.xlsx.writeBuffer());
+  }
+
   // Embeds the real INPTIC logo (same asset the PDF bulletin uses) once per workbook;
   // returns null if the asset is missing so callers can fall back to text-only headers.
   private loadLogoImage(workbook: ExcelJS.Workbook): number | null {
@@ -2118,6 +2181,278 @@ ${body}
     ws.mergeCells(r, 3, r, cols);
     const decisionCell = ws.getCell(r, 3);
     decisionCell.value = { formula: idx(L.avisCol) };
+    decisionCell.font = { bold: true, size: 12 };
+    r += 3;
+
+    ws.mergeCells(r, 1, r, cols);
+    ws.getCell(r, 1).value = 'Fait à Libreville, le ...................';
+    r += 2;
+    ws.mergeCells(r, 1, r, cols);
+    ws.getCell(r, 1).value = 'Le Directeur des Etudes et de la Pédagogie';
+    ws.getCell(r, 1).alignment = { horizontal: 'center' };
+    ws.getCell(r, 1).font = { bold: true };
+    r += 3;
+    ws.mergeCells(r, 1, r, cols);
+    ws.getCell(r, 1).value = 'Davy Edgard MOUSSAVOU';
+    ws.getCell(r, 1).alignment = { horizontal: 'center' };
+    ws.getCell(r, 1).font = { bold: true };
+
+    ws.views = [{ state: 'frozen', ySplit: tableHeaderRow }];
+  }
+
+  // Dense ranking (ties share the first-found rank) by a numeric value, mirroring how
+  // computeSemesterReports ranks students by semesterAverage — used here to rank each UE
+  // individually for TabAnnuel, which the reference workbook does per-UE, not just overall.
+  private rankByValue(entries: { studentId: string; value: number }[]): Map<string, number> {
+    const sorted = [...entries].sort((a, b) => b.value - a.value);
+    const map = new Map<string, number>();
+    for (const e of entries) {
+      map.set(e.studentId, sorted.findIndex((s) => s.studentId === e.studentId) + 1);
+    }
+    return map;
+  }
+
+  // Annual recap — one row per student, reproducing "TabAnnuel" from the reference
+  // workbook: for each of S5/S6, a Moyenne+Rang column pair per UE then Moyenne/Rang/Crédits
+  // for the semester itself, followed by Moyenne Générale, Rang Annuel, Total Crédits, Taux
+  // de validation, Décision du Jury de fin d'année, Mention.
+  private buildTabAnnuelSheet(
+    workbook: ExcelJS.Workbook,
+    data: {
+      className?: string; year: string;
+      s5: { name: string; ueGroups: { ueName: string; ueCode?: string | null }[]; reports: Map<string, any> };
+      s6: { name: string; ueGroups: { ueName: string; ueCode?: string | null }[]; reports: Map<string, any> };
+      students: { id: string; studentId: string; lastName: string; firstName: string }[];
+      annualByStudentId: Map<string, { annualAverage: number; status: string; juryDecision: string; mention: string; totalCreditsWon: number; rank: number }>;
+      logoImageId?: number | null;
+    },
+  ) {
+    const NUM_COL = 1, NOM_COL = 2;
+    let cursor = 3;
+    const semBlocks = [data.s5, data.s6].map((sem) => {
+      const startCol = cursor;
+      const ueCols = sem.ueGroups.map((ue) => { const moyCol = cursor++; const rgCol = cursor++; return { ...ue, moyCol, rgCol }; });
+      const moySemCol = cursor++, rgSemCol = cursor++, creditsSemCol = cursor++;
+      return { ...sem, startCol, ueCols, moySemCol, rgSemCol, creditsSemCol, endCol: cursor - 1 };
+    });
+    const annualStartCol = cursor;
+    const moyGeneraleCol = cursor++, rgAnnuelCol = cursor++, totalCreditsCol = cursor++, tauxCol = cursor++, decisionCol = cursor++, mentionCol = cursor++;
+    const totalCols = cursor - 1;
+
+    const ws = workbook.addWorksheet('TabAnnuel', { properties: { tabColor: { argb: 'FF548235' } } });
+    ws.columns = Array.from({ length: totalCols }, (_, i) => (i < 2 ? { width: i === 0 ? 6 : 26 } : { width: 12 }));
+    this.drawSheetHeader(ws, totalCols, `BILAN ANNUEL — ANNÉE ${data.year}`, data.logoImageId);
+
+    ws.getCell(6, 1).value = 'Classe :';
+    ws.getCell(6, 2).value = data.className || '';
+
+    const BANNER_ROW = 8, SUB_ROW = 10;
+    const headerFill = (cell: ExcelJS.Cell) => {
+      cell.fill = { type: 'pattern', pattern: 'solid', fgColor: { argb: 'FFE0E0E0' } };
+      cell.border = { top: { style: 'thin' }, bottom: { style: 'thin' }, left: { style: 'thin' }, right: { style: 'thin' } };
+      cell.alignment = { horizontal: 'center', vertical: 'middle', wrapText: true };
+      cell.font = { bold: true };
+    };
+    const mergeV = (col: number, value: string) => {
+      ws.mergeCells(BANNER_ROW, col, SUB_ROW - 1, col);
+      const cell = ws.getCell(BANNER_ROW, col);
+      cell.value = value;
+      headerFill(cell);
+    };
+
+    mergeV(NUM_COL, 'N°');
+    mergeV(NOM_COL, "Nom(s) et Prénom(s)");
+
+    for (const sem of semBlocks) {
+      ws.mergeCells(BANNER_ROW, sem.startCol, BANNER_ROW, sem.endCol);
+      const banner = ws.getCell(BANNER_ROW, sem.startCol);
+      banner.value = `Semestre ${sem.name.replace(/^S/i, '')}`;
+      headerFill(banner);
+      for (const ue of sem.ueCols) {
+        const moyHeader = ws.getCell(SUB_ROW, ue.moyCol);
+        moyHeader.value = `Moy ${ue.ueCode || ue.ueName}`;
+        headerFill(moyHeader);
+        const rgHeader = ws.getCell(SUB_ROW, ue.rgCol);
+        rgHeader.value = 'Rg';
+        headerFill(rgHeader);
+      }
+      const moySemHeader = ws.getCell(SUB_ROW, sem.moySemCol); moySemHeader.value = `Moyenne ${sem.name}`; headerFill(moySemHeader);
+      const rgSemHeader = ws.getCell(SUB_ROW, sem.rgSemCol); rgSemHeader.value = 'Rg'; headerFill(rgSemHeader);
+      const creditsSemHeader = ws.getCell(SUB_ROW, sem.creditsSemCol); creditsSemHeader.value = `Crédits ${sem.name}`; headerFill(creditsSemHeader);
+    }
+
+    ws.mergeCells(BANNER_ROW, annualStartCol, BANNER_ROW, mentionCol);
+    const annualBanner = ws.getCell(BANNER_ROW, annualStartCol);
+    annualBanner.value = 'Résultats annuels';
+    headerFill(annualBanner);
+    [[moyGeneraleCol, 'Moyenne Générale'], [rgAnnuelCol, 'Rang Annuel'], [totalCreditsCol, 'Total Crédits'], [tauxCol, 'Taux de validation'], [decisionCol, "Décision du Jury de fin d'année"], [mentionCol, 'Mention']]
+      .forEach(([col, label]) => { const cell = ws.getCell(SUB_ROW, col as number); cell.value = label; headerFill(cell); });
+
+    // Per-UE ranks are computed across the whole cohort per UE (not just per row), so
+    // gather every student's average for each UE column first.
+    const ueRanks = semBlocks.map((sem) => sem.ueCols.map((ue) =>
+      this.rankByValue(data.students.map((s) => ({
+        studentId: s.id,
+        value: sem.reports.get(s.id)?.report?.find((r: any) => r.ueName === ue.ueName)?.average ?? 0,
+      }))),
+    ));
+
+    data.students.forEach((student, idx) => {
+      const rowIdx = SUB_ROW + 1 + idx;
+      ws.getCell(rowIdx, NUM_COL).value = idx + 1;
+      ws.getCell(rowIdx, NOM_COL).value = `${student.lastName} ${student.firstName}`;
+
+      semBlocks.forEach((sem, semIdx) => {
+        const report = sem.reports.get(student.id);
+        const ueByName = new Map((report?.report ?? []).map((ue: any) => [ue.ueName, ue]));
+        sem.ueCols.forEach((ue, ueIdx) => {
+          const ueReport: any = ueByName.get(ue.ueName);
+          ws.getCell(rowIdx, ue.moyCol).value = ueReport?.average ?? '';
+          ws.getCell(rowIdx, ue.rgCol).value = ueRanks[semIdx][ueIdx].get(student.id) ?? '';
+        });
+        ws.getCell(rowIdx, sem.moySemCol).value = report?.semesterAverage ?? '';
+        ws.getCell(rowIdx, sem.rgSemCol).value = report?.rank ?? '';
+        ws.getCell(rowIdx, sem.creditsSemCol).value = report?.totalCreditsWon ?? '';
+      });
+
+      const annual = data.annualByStudentId.get(student.id);
+      ws.getCell(rowIdx, moyGeneraleCol).value = annual?.annualAverage ?? '';
+      ws.getCell(rowIdx, rgAnnuelCol).value = annual?.rank ?? '';
+      ws.getCell(rowIdx, totalCreditsCol).value = annual?.totalCreditsWon ?? '';
+      ws.getCell(rowIdx, tauxCol).value = annual ? Math.round((annual.totalCreditsWon / 60) * 100) / 100 : '';
+      ws.getCell(rowIdx, decisionCol).value = annual?.juryDecision ?? '';
+      ws.getCell(rowIdx, mentionCol).value = annual?.mention ?? '';
+    });
+
+    ws.getCell(1, 1).note = 'Lecture seule — générée automatiquement depuis les notes déjà saisies des deux semestres.';
+    ws.views = [{ state: 'frozen', xSplit: 2, ySplit: SUB_ROW }];
+  }
+
+  // One-student annual bulletin, selected by N° and pulled live from TabAnnuel via INDEX() —
+  // same interaction pattern as the per-semester Bulletin sheet. Unlike TabAnnuel (a direct
+  // reproduction of the reference workbook's own sheet), this has no reliable reference to
+  // reproduce — the source file's "BullAnnuel"/"BullAnnuel (2)" sheets are leftover artifacts
+  // from a different program (USTM Ecole Polytechnique DUT) with mismatched institution
+  // names, signatures and stray cross-references — so it's built to match our own
+  // per-semester Bulletin sheet's design instead.
+  private buildBulletinAnnuelSheet(
+    workbook: ExcelJS.Workbook,
+    data: {
+      className?: string; year: string;
+      s5UeGroups: { ueName: string; ueCode?: string | null }[];
+      s6UeGroups: { ueName: string; ueCode?: string | null }[];
+      studentCount: number; logoImageId?: number | null;
+    },
+  ) {
+    // Recompute the exact same column layout TabAnnuel used, so the INDEX() column refs line up.
+    const NUM_COL = 1, NOM_COL = 2;
+    let cursor = 3;
+    const semBlocks = [{ name: 'S5', ueGroups: data.s5UeGroups }, { name: 'S6', ueGroups: data.s6UeGroups }].map((sem) => {
+      const ueCols = sem.ueGroups.map((ue) => { const moyCol = cursor++; const rgCol = cursor++; return { ...ue, moyCol, rgCol }; });
+      const moySemCol = cursor++, rgSemCol = cursor++, creditsSemCol = cursor++;
+      return { ...sem, ueCols, moySemCol, rgSemCol, creditsSemCol };
+    });
+    const moyGeneraleCol = cursor++, rgAnnuelCol = cursor++, totalCreditsCol = cursor++, tauxCol = cursor++, decisionCol = cursor++, mentionCol = cursor++;
+
+    const cols = 8;
+    const ws = workbook.addWorksheet('BulletinAnnuel', { properties: { tabColor: { argb: 'FFFFD966' } } });
+    ws.columns = [{ width: 4 }, { width: 30 }, { width: 10 }, { width: 10 }, { width: 6 }, { width: 6 }, { width: 12 }, { width: 14 }];
+    this.drawSheetHeader(ws, cols, `BULLETIN DE NOTES ANNUEL — ${data.year}`, data.logoImageId);
+
+    let r = 6;
+    ws.mergeCells(r, 1, r, cols); ws.getCell(r, 1).value = `Année universitaire : ${data.year}`; ws.getCell(r, 1).font = { bold: true }; r += 1;
+    ws.mergeCells(r, 1, r, cols); ws.getCell(r, 1).value = `Classe : ${data.className || ''}`; ws.getCell(r, 1).font = { bold: true }; r += 2;
+
+    const selectorRow = r;
+    ws.getCell(selectorRow, 1).value = `N° de l'étudiant (1 à ${data.studentCount}) :`;
+    ws.getCell(selectorRow, 1).font = { bold: true };
+    const selectorCell = ws.getCell(selectorRow, 3);
+    selectorCell.value = 1;
+    selectorCell.font = { bold: true, size: 14 };
+    selectorCell.fill = { type: 'pattern', pattern: 'solid', fgColor: { argb: 'FFFFE699' } };
+    selectorCell.alignment = { horizontal: 'center' };
+    selectorCell.border = { top: { style: 'medium' }, bottom: { style: 'medium' }, left: { style: 'medium' }, right: { style: 'medium' } };
+    selectorCell.note = `Changez ce nombre (1 à ${data.studentCount}) pour afficher le bulletin annuel d'un autre étudiant.`;
+    r += 2;
+
+    const TABANNUEL_SUB_ROW = 10;
+    const rowRef = `${TABANNUEL_SUB_ROW}+$C$${selectorRow}`;
+    const idx = (col: number) => `INDEX(TabAnnuel!${this.columnLetter(col)}:${this.columnLetter(col)},${rowRef})`;
+
+    const field = (label: string, formula: string, bold = false) => {
+      ws.mergeCells(r, 1, r, 3); ws.getCell(r, 1).value = label; ws.getCell(r, 1).font = { bold: true };
+      ws.mergeCells(r, 4, r, cols);
+      const cell = ws.getCell(r, 4);
+      cell.value = { formula };
+      if (bold) cell.font = { bold: true, size: 12 };
+      r += 1;
+    };
+
+    field('Nom(s) et Prénom(s)', idx(NOM_COL), true);
+    r += 1;
+
+    const tableHeaderRow = r;
+    ws.mergeCells(r, 1, r, 2); ws.getCell(r, 1).value = 'UE';
+    ws.getCell(r, 5).value = 'Moyenne';
+    ws.mergeCells(r, 6, r, cols); ws.getCell(r, 6).value = 'Rang';
+    ws.getRow(r).eachCell((cell) => {
+      cell.font = { bold: true }; cell.alignment = { horizontal: 'center', wrapText: true };
+      cell.fill = { type: 'pattern', pattern: 'solid', fgColor: { argb: 'FFE0E0E0' } };
+      cell.border = { top: { style: 'thin' }, bottom: { style: 'thin' }, left: { style: 'thin' }, right: { style: 'thin' } };
+    });
+    r += 1;
+
+    for (const sem of semBlocks) {
+      ws.mergeCells(r, 1, r, cols);
+      const semRow = ws.getCell(r, 1);
+      semRow.value = `Semestre ${sem.name.replace(/^S/i, '')}`;
+      semRow.font = { bold: true };
+      semRow.fill = { type: 'pattern', pattern: 'solid', fgColor: { argb: 'FFD9D9D9' } };
+      r += 1;
+
+      for (const ue of sem.ueCols) {
+        ws.mergeCells(r, 1, r, 2); ws.getCell(r, 1).value = ue.ueCode ? `${ue.ueCode} : ${ue.ueName}` : ue.ueName;
+        ws.getCell(r, 5).value = { formula: idx(ue.moyCol) };
+        ws.mergeCells(r, 6, r, cols); ws.getCell(r, 6).value = { formula: idx(ue.rgCol) };
+        r += 1;
+      }
+      ws.mergeCells(r, 1, r, 2); ws.getCell(r, 1).value = `Moyenne ${sem.name}`; ws.getCell(r, 1).font = { bold: true };
+      ws.getCell(r, 5).value = { formula: idx(sem.moySemCol) }; ws.getCell(r, 5).font = { bold: true };
+      ws.mergeCells(r, 6, r, cols); ws.getCell(r, 6).value = { formula: idx(sem.rgSemCol) };
+      r += 1;
+      ws.mergeCells(r, 1, r, 2); ws.getCell(r, 1).value = `Crédits ${sem.name}`;
+      ws.mergeCells(r, 5, r, cols); ws.getCell(r, 5).value = { formula: idx(sem.creditsSemCol) };
+      r += 1;
+    }
+
+    r += 1;
+    ws.mergeCells(r, 1, r, 3); ws.getCell(r, 1).value = 'Moyenne Générale'; ws.getCell(r, 1).font = { bold: true, size: 12 };
+    ws.mergeCells(r, 4, r, cols);
+    const moyCell = ws.getCell(r, 4);
+    moyCell.value = { formula: idx(moyGeneraleCol) };
+    moyCell.font = { bold: true, size: 12 };
+    r += 2;
+
+    ws.getCell(r, 1).value = "Rang de l'étudiant à l'année"; ws.getCell(r, 1).font = { bold: true };
+    ws.mergeCells(r, 3, r, 4);
+    ws.getCell(r, 3).value = { formula: `${idx(rgAnnuelCol)}&"/${data.studentCount}"` };
+    ws.getCell(r, 6).value = 'Mention'; ws.getCell(r, 6).font = { bold: true };
+    ws.mergeCells(r, 7, r, cols);
+    ws.getCell(r, 7).value = { formula: idx(mentionCol) };
+    r += 2;
+
+    ws.getCell(r, 1).value = 'Total Crédits'; ws.getCell(r, 1).font = { bold: true };
+    ws.mergeCells(r, 3, r, 4);
+    ws.getCell(r, 3).value = { formula: `${idx(totalCreditsCol)}&"/60"` };
+    ws.getCell(r, 6).value = 'Taux de validation'; ws.getCell(r, 6).font = { bold: true };
+    ws.mergeCells(r, 7, r, cols);
+    ws.getCell(r, 7).value = { formula: `TEXT(${idx(tauxCol)},"0%")` };
+    r += 3;
+
+    ws.getCell(r, 1).value = "Décision du Jury de fin d'année académique :"; ws.getCell(r, 1).font = { bold: true };
+    ws.mergeCells(r, 4, r, cols);
+    const decisionCell = ws.getCell(r, 4);
+    decisionCell.value = { formula: idx(decisionCol) };
     decisionCell.font = { bold: true, size: 12 };
     r += 3;
 

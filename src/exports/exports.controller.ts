@@ -275,6 +275,23 @@ export class ExportsController {
     res.end(buffer);
   }
 
+  @Get('template-annual/:year')
+  @ApiOperation({ summary: 'Download the annual (S5+S6) recap workbook — TabAnnuel + BulletinAnnuel' })
+  async getAnnualTemplate(
+    @Param('year') year: string,
+    @Res() res: Response,
+  ) {
+    const buffer = await this.exportsService.generateAnnualTemplate(year);
+
+    res.set({
+      'Content-Type': 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
+      'Content-Disposition': `attachment; filename=bilan_annuel_${year}.xlsx`,
+      'Content-Length': buffer.length,
+    });
+
+    res.end(buffer);
+  }
+
   @Post('import-students')
   @Roles(Role.ADMIN, Role.SECRETARY)
   @UseInterceptors(FileInterceptor('file'))
