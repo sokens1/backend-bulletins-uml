@@ -1174,9 +1174,10 @@ ${body}
       this.styleTemplateHeaderRow(worksheet);
     } else {
       // One "RELEVÉ DE NOTES" sheet per subject — mirrors the school's own historical
-      // gradebook (ASUR 2014-2015.xls: one signed relevé per subject, with the institution
-      // header, Classe/Année/Matière/Coefficient/Semestre/Enseignant block, a N°/Élèves/
-      // CC/Examen/Moyenne table, and signature lines) instead of a generic spreadsheet.
+      // gradebook (ASUR 2014-2015.xls: an "FV" roster sheet first, then one signed relevé
+      // per subject — logo, institution header, Classe/Année/Matière/Coefficient/Semestre/
+      // Enseignant block, a N°/Élèves/CC/Examen/Moyenne table, signature lines, and each
+      // subject's tab colored by its UE) instead of a generic spreadsheet.
       const subjects = semesterId
         ? await this.prisma.subject.findMany({
             where: { ue: { semesterId } },
@@ -1188,6 +1189,7 @@ ${body}
         ? await this.prisma.student.findMany({ orderBy: [{ lastName: 'asc' }, { firstName: 'asc' }] })
         : [];
       const semester = semesterId ? await this.prisma.semester.findUnique({ where: { id: semesterId } }) : null;
+      const logoImageId = this.loadLogoImage(workbook);
 
       if (semesterId && subjects.length === 0) {
         const worksheet = workbook.addWorksheet('Relevé');
@@ -1195,13 +1197,28 @@ ${body}
       } else {
         const effectiveSubjects = subjects.length > 0
           ? subjects
-          : [{ id: 'sample', name: 'Anglais technique', coefficient: 1, ccWeight: 0.4, examWeight: 0.6, teacher: null } as any];
+          : [{ id: 'sample', name: 'Anglais technique', coefficient: 1, ccWeight: 0.4, examWeight: 0.6, teacher: null, ue: { name: 'UE' } } as any];
         const effectiveStudents = students.length > 0
           ? students
           : [{ studentId: 'INPTIC-2024-001', lastName: 'DUPONT', firstName: 'Jean' } as any];
 
+        this.buildRosterSheet(workbook, {
+          className: students[0]?.class,
+          year: semester?.year,
+          semesterName: semester?.name,
+          students: effectiveStudents,
+          logoImageId,
+        });
+
+        // One tab color per UE (cycling through a fixed palette) so subjects group
+        // visually at a glance, the way the reference workbook color-codes its tabs.
+        const ueColors = new Map<string, string>();
+        const palette = ['FFB4C7E7', 'FFC6E0B4', 'FFFFE699', 'FFF4B183', 'FFD9B3E6', 'FFA9D18E'];
         const usedSheetNames = new Set<string>();
         for (const subject of effectiveSubjects) {
+          const ueName: string = subject.ue?.name || 'UE';
+          if (!ueColors.has(ueName)) ueColors.set(ueName, palette[ueColors.size % palette.length]);
+
           this.buildReleveSheet(workbook, {
             subjectName: subject.name,
             coefficient: subject.coefficient,
@@ -1212,6 +1229,8 @@ ${body}
             year: semester?.year,
             semesterName: semester?.name,
             students: effectiveStudents,
+            logoImageId,
+            tabColor: ueColors.get(ueName)!,
           }, usedSheetNames);
         }
       }
@@ -1219,6 +1238,18 @@ ${body}
 
     const buffer = await workbook.xlsx.writeBuffer();
     return Buffer.from(buffer);
+  }
+
+  // Embeds the real INPTIC logo (same asset the PDF bulletin uses) once per workbook;
+  // returns null if the asset is missing so callers can fall back to text-only headers.
+  private loadLogoImage(workbook: ExcelJS.Workbook): number | null {
+    try {
+      const logoPath = path.join(process.cwd(), 'src/assets/logo-inptic.png');
+      const buffer = fs.readFileSync(logoPath);
+      return workbook.addImage({ buffer: buffer as any, extension: 'png' });
+    } catch {
+      return null;
+    }
   }
 
   // Row/column layout the "relevé de notes" sheets below use — importGradesFromExcel reads
@@ -1241,15 +1272,23 @@ ${body}
       year?: string;
       semesterName?: string;
       students: { studentId: string; lastName: string; firstName: string }[];
+      logoImageId?: number | null;
+      tabColor?: string;
     },
     usedSheetNames: Set<string>,
   ) {
     const R = ExportsService.RELEVE;
     const sheetName = this.uniqueSheetName(data.subjectName, usedSheetNames);
-    const ws = workbook.addWorksheet(sheetName);
+    const ws = workbook.addWorksheet(sheetName, data.tabColor ? { properties: { tabColor: { argb: data.tabColor } } } : undefined);
     ws.columns = [
       { width: 6 }, { width: 18 }, { width: 34 }, { width: 14 }, { width: 14 }, { width: 14 }, { width: 12 },
     ];
+    ws.getRow(1).height = 20;
+    ws.getRow(2).height = 20;
+    ws.getRow(3).height = 20;
+    if (data.logoImageId != null) {
+      ws.addImage(data.logoImageId, { tl: { col: 0.2, row: 0.1 }, ext: { width: 44, height: 36 } });
+    }
 
     const centerBold = (cell: ExcelJS.Cell, size = 9) => { cell.font = { bold: true, size }; cell.alignment = { horizontal: 'center' }; };
 
@@ -1336,6 +1375,65 @@ ${body}
     ws.views = [{ state: 'frozen', ySplit: R.HEADER_ROW }];
   }
 
+  // First tab of the workbook: a roster of the whole class (matricule/nom/prénom), matching
+  // "FV" in the reference gradebook — a blank master relevé it duplicated per subject. Filled
+  // in here as a genuinely useful index/summary page instead of a blank template.
+  private buildRosterSheet(
+    workbook: ExcelJS.Workbook,
+    data: {
+      className?: string;
+      year?: string;
+      semesterName?: string;
+      students: { studentId: string; lastName: string; firstName: string }[];
+      logoImageId?: number | null;
+    },
+  ) {
+    const ws = workbook.addWorksheet('FV', { properties: { tabColor: { argb: 'FF8497B0' } } });
+    ws.columns = [{ width: 6 }, { width: 20 }, { width: 26 }, { width: 26 }];
+    ws.getRow(1).height = 20;
+    ws.getRow(2).height = 20;
+    if (data.logoImageId != null) {
+      ws.addImage(data.logoImageId, { tl: { col: 0.2, row: 0.1 }, ext: { width: 44, height: 36 } });
+    }
+
+    const centerBold = (cell: ExcelJS.Cell, size = 9) => { cell.font = { bold: true, size }; cell.alignment = { horizontal: 'center' }; };
+    ws.mergeCells(1, 1, 1, 4);
+    centerBold(ws.getCell(1, 1));
+    ws.getCell(1, 1).value = 'INSTITUT NATIONAL DE LA POSTE, DES TECHNOLOGIES DE L\'INFORMATION ET DE LA COMMUNICATION';
+    ws.mergeCells(2, 1, 2, 4);
+    centerBold(ws.getCell(2, 1));
+    ws.getCell(2, 1).value = 'DIRECTION DES ETUDES ET DE LA PEDAGOGIE';
+
+    ws.mergeCells(4, 1, 4, 4);
+    const title = ws.getCell(4, 1);
+    title.value = 'FICHE DE VIE — LISTE DES ÉTUDIANTS';
+    title.font = { bold: true, size: 13 };
+    title.alignment = { horizontal: 'center' };
+
+    ws.getCell(6, 1).value = 'Classe :';
+    ws.getCell(6, 2).value = data.className || '';
+    ws.getCell(6, 3).value = 'Année :';
+    ws.getCell(6, 4).value = data.year || '';
+    ws.getCell(7, 1).value = 'Semestre :';
+    ws.getCell(7, 2).value = data.semesterName || '';
+
+    const headerRow = ws.getRow(9);
+    headerRow.values = ['N°', 'Matricule', 'Nom', 'Prénom'];
+    headerRow.font = { bold: true };
+    headerRow.alignment = { horizontal: 'center' };
+    headerRow.eachCell((cell) => {
+      cell.fill = { type: 'pattern', pattern: 'solid', fgColor: { argb: 'FFE0E0E0' } };
+      cell.border = { top: { style: 'thin' }, bottom: { style: 'thin' }, left: { style: 'thin' }, right: { style: 'thin' } };
+    });
+
+    data.students.forEach((student, idx) => {
+      const row = ws.getRow(10 + idx);
+      row.values = [idx + 1, student.studentId, student.lastName, student.firstName];
+    });
+
+    ws.views = [{ state: 'frozen', ySplit: 9 }];
+  }
+
   private uniqueSheetName(subjectName: string, used: Set<string>): string {
     // Excel sheet names: max 31 chars, and : \ / ? * [ ] are forbidden.
     let base = subjectName.replace(/[:\\/?*[\]]/g, ' ').trim().slice(0, 31) || 'Matière';
@@ -1399,24 +1497,57 @@ ${body}
 
     if (!worksheet) throw new NotFoundException('Worksheet not found');
 
-    let count = 0;
+    // Loaded once up front so re-importing a roster (the same file, or a corrected one)
+    // updates the matching student in place instead of failing on "email already exists" —
+    // previously a single duplicate aborted the whole import (no try/catch at all).
+    const existingStudents = await this.prisma.student.findMany();
+    const studentByMatricule = new Map(existingStudents.map((s) => [this.normalizeText(s.studentId), s]));
+
+    let created = 0;
+    let updated = 0;
+    let skipped = 0;
+    const errors: string[] = [];
+
     for (let i = 2; i <= worksheet.rowCount; i++) {
         const row = worksheet.getRow(i);
-        const studentId = row.getCell(1).toString();
-        const lastName = row.getCell(2).toString();
-        const firstName = row.getCell(3).toString();
-        const email = row.getCell(4).toString();
+        const studentId = row.getCell(1).toString().trim();
+        const lastName = row.getCell(2).toString().trim();
+        const firstName = row.getCell(3).toString().trim();
+        const email = row.getCell(4).toString().trim();
         // Importing from a specific class's page (defaultClass set) lets the CLASSE column
         // be left blank — every row then falls into that class instead of the generic default.
         const className = row.getCell(5).toString().trim() || defaultClass || '';
-        const birthDateStr = row.getCell(6).toString();
-        const birthPlace = row.getCell(7).toString();
-        const bacType = row.getCell(8).toString();
-        const provenance = row.getCell(9).toString();
-        const password = row.getCell(10).toString() || 'Inptic2024!';
+        const birthDateStr = row.getCell(6).toString().trim();
+        const birthPlace = row.getCell(7).toString().trim();
+        const bacType = row.getCell(8).toString().trim();
+        const provenance = row.getCell(9).toString().trim();
+        const password = row.getCell(10).toString().trim() || 'Inptic2024!';
 
-        if (studentId && email) {
-            await this.usersService.createStudent({
+        if (!studentId) continue; // blank row
+
+        const existing = studentByMatricule.get(this.normalizeText(studentId));
+
+        try {
+          if (existing) {
+            // Only overwrite fields actually provided in this row, so a partially-filled
+            // re-import can't blank out data that was already there.
+            await this.usersService.updateStudent(existing.id, {
+              firstName: firstName || undefined,
+              lastName: lastName || undefined,
+              class: className || undefined,
+              birthDate: birthDateStr || undefined,
+              birthPlace: birthPlace || undefined,
+              bacType: bacType || undefined,
+              provenance: provenance || undefined,
+            });
+            updated++;
+          } else {
+            if (!email) {
+              skipped++;
+              errors.push(`Ligne ${i}: email manquant pour le nouvel étudiant ("${studentId}")`);
+              continue;
+            }
+            const result = await this.usersService.createStudent({
                 studentId,
                 lastName,
                 firstName,
@@ -1428,10 +1559,15 @@ ${body}
                 provenance,
                 password,
             });
-            count++;
+            if (result.student) studentByMatricule.set(this.normalizeText(studentId), result.student);
+            created++;
+          }
+        } catch (e) {
+          skipped++;
+          errors.push(`Ligne ${i} (${studentId}): ${e instanceof Error ? e.message : 'erreur inconnue'}`);
         }
     }
 
-    return { imported: count };
+    return { imported: created, updated, skipped, errors };
   }
 }
