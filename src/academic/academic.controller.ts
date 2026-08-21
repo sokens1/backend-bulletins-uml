@@ -7,6 +7,7 @@ import {
   CreateClassDto,
   CreateAcademicYearDto,
   UpdateSemesterDto,
+  UpdateSubjectDto,
 } from './dto/academic.dto';
 import { ApiTags, ApiOperation, ApiBearerAuth } from '@nestjs/swagger';
 import { JwtAuthGuard } from '../auth/guard/jwt-auth.guard';
@@ -133,7 +134,7 @@ export class AcademicController {
   @Patch('subject/:id')
   @Roles(Role.ADMIN)
   @ApiOperation({ summary: 'Update a subject' })
-  updateSubject(@Param('id') id: string, @Body() dto: any) {
+  updateSubject(@Param('id') id: string, @Body() dto: UpdateSubjectDto) {
     return this.academicService.updateSubject(id, dto);
   }
 

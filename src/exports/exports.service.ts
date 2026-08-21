@@ -4,6 +4,7 @@ import { DatabaseService } from '../database/database.service';
 import { UsersService } from '../users/users.service';
 import { PDFDocument, rgb, StandardFonts, PDFFont, PDFPage } from 'pdf-lib';
 import * as ExcelJS from 'exceljs';
+import * as XLSX from 'xlsx';
 import * as fs from 'fs';
 import * as path from 'path';
 import archiver from 'archiver';
@@ -15,6 +16,23 @@ export class ExportsService {
     private prisma: DatabaseService,
     private usersService: UsersService,
   ) {}
+
+  // ExcelJS only reads the modern .xlsx (OOXML) format — a legacy .xls (BIFF/OLE2, pre-2007
+  // Excel, like the historical "ASUR 2014-2015.xls" gradebook) fails to load at all. SheetJS
+  // (xlsx package) reads both, so any incoming .xls is transparently re-serialized to .xlsx
+  // in memory before the rest of the import pipeline (built on ExcelJS) ever sees it.
+  private toXlsxBuffer(buffer: Buffer): Buffer {
+    const isLegacyXls = buffer.length >= 8 && buffer.readUInt32LE(0) === 0xe011cfd0;
+    if (!isLegacyXls) return buffer;
+    const wb = XLSX.read(buffer, { type: 'buffer', cellDates: true });
+    // Legacy .xls merge ranges occasionally overlap in ways ExcelJS's stricter xlsx parser
+    // rejects outright ("Cannot merge already merged cells"). Only cell VALUES matter for
+    // import (never merge geometry), so they're dropped rather than round-tripped.
+    for (const name of wb.SheetNames) {
+      delete (wb.Sheets[name] as any)['!merges'];
+    }
+    return XLSX.write(wb, { type: 'buffer', bookType: 'xlsx' }) as Buffer;
+  }
 
   async generateBulletinPdf(studentId: string, semesterId: string): Promise<Buffer> {
     const report = await this.gradesService.calculateStudentReport(studentId, semesterId);
@@ -950,6 +968,26 @@ ${body}
     return s.trim().replace(/\s+/g, ' ').toLowerCase();
   }
 
+  // ExcelJS's own Cell.toString()/.text just call the raw value's toString(), which for a
+  // formula cell yields "[object Object]" instead of its computed number — a real problem
+  // for the reference workbook, whose Moyenne (and even some CC/Examen) cells are actual
+  // Excel formulas with a cached result. Reads that cached result for formula cells, and
+  // falls back to the plain text/number/date for everything else.
+  private cellString(cell: ExcelJS.Cell): string {
+    const v: any = cell.value;
+    if (v == null) return '';
+    if (typeof v === 'object') {
+      if ('result' in v) {
+        const result = v.result;
+        return result != null && typeof result !== 'object' ? String(result) : '';
+      }
+      if ('text' in v) return String(v.text ?? '');
+      if (v instanceof Date) return v.toISOString();
+      return '';
+    }
+    return String(v);
+  }
+
   // Accepts either "14.5" or the French "14,5" and validates the 0-20 range required by
   // the grading rules. Returns an error string instead of silently dropping bad input.
   private parseGradeCell(raw: string, label: string): { value?: number; error?: string } {
@@ -992,9 +1030,47 @@ ${body}
     return `AUTO-${stamp}-${rand}`;
   }
 
+  // Locates a relevé sheet's layout by scanning for its "Matière :" label and its "Élèves"
+  // header — rather than assuming fixed row/column numbers. This is what lets the importer
+  // accept BOTH our own generated canvas (logo header, Matière at row 7) AND the historical
+  // reference workbook's own relevé sheets (plain text header, Matière at row 10) — any
+  // relevé built on the same N°/Élèves/CC/Examen/Moyenne row pattern, whatever its header
+  // height. Coefficient/Enseignant/Classe sit at fixed offsets from the Matière row in both
+  // formats (one row below/above respectively, same column), so they're derived from it too.
+  private locateReleveLayout(ws: ExcelJS.Worksheet): {
+    matiereRow: number; matiereCol: number; classeRow: number; coeffRow: number; enseignantRow: number;
+    headerRow: number; colNum: number; colEleve: number; colCC: number; colExam: number; colMoy: number;
+  } | null {
+    const MAX_ROWS = 25;
+    const MAX_COLS = 12;
+    let matiereRow = -1, matiereCol = -1;
+    let headerRow = -1, colEleve = -1;
+    for (let r = 1; r <= MAX_ROWS; r++) {
+      for (let c = 1; c <= MAX_COLS; c++) {
+        const text = this.normalizeText(this.cellString(ws.getCell(r, c)));
+        if (matiereRow === -1 && text.includes('matière')) {
+          matiereRow = r;
+          matiereCol = c + 1;
+        }
+        if (headerRow === -1 && text.startsWith('élève')) {
+          headerRow = r;
+          colEleve = c;
+        }
+      }
+      if (matiereRow !== -1 && headerRow !== -1) break;
+    }
+    if (matiereRow === -1 || headerRow === -1) return null;
+    return {
+      matiereRow, matiereCol,
+      classeRow: matiereRow - 1, coeffRow: matiereRow + 1, enseignantRow: matiereRow + 2,
+      headerRow,
+      colNum: colEleve - 1, colEleve, colCC: colEleve + 1, colExam: colEleve + 2, colMoy: colEleve + 3,
+    };
+  }
+
   async importGradesFromExcel(buffer: Buffer, semesterId: string, userId: string) {
     const workbook = new ExcelJS.Workbook();
-    await workbook.xlsx.load(buffer as any);
+    await workbook.xlsx.load(this.toXlsxBuffer(buffer) as any);
 
     if (workbook.worksheets.length === 0) throw new NotFoundException('Worksheet not found');
 
@@ -1030,7 +1106,6 @@ ${body}
     const createdSubjects: string[] = [];
     const createdStudents: string[] = [];
     let anyReleveSheetFound = false;
-    const R = ExportsService.RELEVE;
 
     // Lazily created once per import: a holding UE for subjects that arrive via a relevé but
     // don't exist yet — the relevé has no way to say which UE a subject belongs to, so it
@@ -1044,9 +1119,15 @@ ${body}
       return placeholderUE;
     };
 
-    // Each sheet is one subject's "relevé de notes" (see buildReleveSheet) — the subject
-    // is read from the fixed "Matière :" cell rather than the sheet tab (which is
-    // sanitized/truncated for Excel and isn't reliable for matching).
+    // Sheets that are never a relevé, whatever their internal layout — our own canvas
+    // (FV/TabNote/Bulletin/Absences) and the reference workbook's own recap sheets
+    // (TabNotS5/BULLETIN S5/TabNotS6/BULLETIN S6/TabAnnuel/BullAnnuel/empty Feuil2-3).
+    const NON_RELEVE_SHEET = /^(fv|absences|tabnote|bulletin|tabnots|tabannuel|bullannuel|feuil)/i;
+
+    // Each sheet is one subject's "relevé de notes" — the subject name is read from its
+    // "Matière :" cell (located dynamically, see locateReleveLayout) rather than the sheet
+    // tab (sanitized/truncated for Excel, unreliable for matching), which is also what lets
+    // this accept the historical reference workbook's own relevé sheets, not just our canvas.
     for (const worksheet of workbook.worksheets) {
       if (worksheet.name === 'Absences') {
         const abs = await this.importAbsencesSheet(worksheet, semesterId, userId, studentByName);
@@ -1055,19 +1136,20 @@ ${body}
         errors.push(...abs.errors);
         continue;
       }
-      if (worksheet.name === 'FV' || worksheet.name === 'TabNote' || worksheet.name === 'Bulletin') continue; // roster/read-only/preview sheets
+      if (NON_RELEVE_SHEET.test(worksheet.name)) continue;
 
-      const subjectRef = worksheet.getCell(R.MATIERE_ROW, R.MATIERE_COL).toString().trim();
-      const headerLabel = this.normalizeText(worksheet.getCell(R.HEADER_ROW, R.COL_ELEVE).toString());
-      if (!subjectRef || !headerLabel.startsWith('élève')) continue; // not a relevé sheet
+      const layout = this.locateReleveLayout(worksheet);
+      if (!layout) continue; // not a relevé sheet
+      const subjectRef = this.cellString(worksheet.getCell(layout.matiereRow, layout.matiereCol)).trim();
+      if (!subjectRef) continue;
       anyReleveSheetFound = true;
 
       let subject = subjectById.get(subjectRef) ?? subjectByName.get(this.normalizeText(subjectRef));
       if (!subject) {
         try {
           const ue = await getOrCreatePlaceholderUE();
-          const coeffCell = Number(worksheet.getCell(8, 2).value);
-          const teacherName = worksheet.getCell(9, 2).toString().trim();
+          const coeffCell = Number(worksheet.getCell(layout.coeffRow, layout.matiereCol).value);
+          const teacherName = this.cellString(worksheet.getCell(layout.enseignantRow, layout.matiereCol)).trim();
           let teacher: { id: string } | null = null;
           if (teacherName) {
             const allTeachers = await this.prisma.teacher.findMany();
@@ -1091,11 +1173,11 @@ ${body}
         }
       }
 
-      const sheetClass = worksheet.getCell(6, 2).toString().trim();
+      const sheetClass = this.cellString(worksheet.getCell(layout.classeRow, layout.matiereCol)).trim();
 
-      for (let i = R.HEADER_ROW + 1; i <= worksheet.rowCount; i++) {
+      for (let i = layout.headerRow + 1; i <= worksheet.rowCount; i++) {
         const row = worksheet.getRow(i);
-        const eleveName = row.getCell(R.COL_ELEVE).toString().trim();
+        const eleveName = this.cellString(row.getCell(layout.colEleve)).trim();
         if (!eleveName) break; // end of the student list for this sheet
 
         const nameKey = this.normalizeText(eleveName);
@@ -1131,8 +1213,8 @@ ${body}
           if (!student) continue; // unreachable in practice, satisfies control-flow narrowing below
         }
 
-        const cc = this.parseGradeCell(row.getCell(R.COL_CC).toString().trim(), 'Note CC');
-        const exam = this.parseGradeCell(row.getCell(R.COL_EXAM).toString().trim(), 'Note Examen');
+        const cc = this.parseGradeCell(this.cellString(row.getCell(layout.colCC)).trim(), 'Note CC');
+        let exam = this.parseGradeCell(this.cellString(row.getCell(layout.colExam)).trim(), 'Note Examen');
         const rowErrors = [cc.error, exam.error].filter(Boolean);
         if (rowErrors.length > 0) {
           skipped++;
@@ -1140,7 +1222,12 @@ ${body}
           continue;
         }
         if (cc.value === undefined && exam.value === undefined) {
-          continue; // left blank for this student — not an error
+          // Some relevés (e.g. Stage, Soutenance in the reference workbook) record a single
+          // holistic grade directly in the Moyenne column instead of a CC/Examen split —
+          // fall back to reading it as the exam grade so those subjects still import.
+          const moyenne = this.parseGradeCell(this.cellString(row.getCell(layout.colMoy)).trim(), 'Moyenne');
+          if (moyenne.value === undefined) continue; // genuinely left blank — not an error
+          exam = moyenne;
         }
 
         // A subject already had an exam grade before this import → this Examen value is a
@@ -1196,7 +1283,7 @@ ${body}
     const errors: string[] = [];
 
     const headerRow = worksheet.getRow(10);
-    if (!this.normalizeText(headerRow.getCell(2).toString()).startsWith('élève')) {
+    if (!this.normalizeText(this.cellString(headerRow.getCell(2))).startsWith('élève')) {
       return { count, skipped, errors }; // not a recognized Absences layout
     }
 
@@ -1204,7 +1291,7 @@ ${body}
     const subjectByName = new Map(subjects.map((s) => [this.normalizeText(s.name), s]));
     const subjectColumns: { col: number; subjectId: string }[] = [];
     for (let c = 3; c <= worksheet.columnCount; c++) {
-      const header = headerRow.getCell(c).toString().trim();
+      const header = this.cellString(headerRow.getCell(c)).trim();
       if (!header) continue;
       const subject = subjectByName.get(this.normalizeText(header));
       if (subject) subjectColumns.push({ col: c, subjectId: subject.id });
@@ -1216,7 +1303,7 @@ ${body}
 
     for (let i = 11; i <= worksheet.rowCount; i++) {
       const row = worksheet.getRow(i);
-      const eleveName = row.getCell(2).toString().trim();
+      const eleveName = this.cellString(row.getCell(2)).trim();
       if (!eleveName) break;
 
       const match = studentByName.get(this.normalizeText(eleveName));
@@ -1233,7 +1320,7 @@ ${body}
       }
 
       for (const { col, subjectId } of subjectColumns) {
-        const raw = row.getCell(col).toString().trim();
+        const raw = this.cellString(row.getCell(col)).trim();
         if (raw === '') continue;
         const hours = Number(raw.replace(',', '.'));
         if (!Number.isFinite(hours) || hours < 0) {
@@ -2094,7 +2181,7 @@ ${body}
 
   async importStudentsFromExcel(buffer: Buffer, defaultClass?: string) {
     const workbook = new ExcelJS.Workbook();
-    await workbook.xlsx.load(buffer as any);
+    await workbook.xlsx.load(this.toXlsxBuffer(buffer) as any);
     const worksheet = workbook.getWorksheet(1);
 
     if (!worksheet) throw new NotFoundException('Worksheet not found');

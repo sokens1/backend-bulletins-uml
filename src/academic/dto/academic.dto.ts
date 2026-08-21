@@ -1,5 +1,5 @@
 import { ApiProperty } from '@nestjs/swagger';
-import { IsNotEmpty, IsString, IsBoolean, IsOptional, IsInt, IsNumber } from 'class-validator';
+import { IsNotEmpty, IsString, IsBoolean, IsOptional, IsInt, IsNumber, Min, Max } from 'class-validator';
 
 export class CreateSemesterDto {
   @ApiProperty({ example: 'S5' })
@@ -77,12 +77,78 @@ export class CreateSubjectDto {
   @IsOptional()
   coefficient?: number;
 
+  @ApiProperty({ example: 2, default: 2, description: 'Crédits ECTS de la matière' })
+  @IsInt()
+  @IsOptional()
+  credits?: number;
+
+  @ApiProperty({
+    example: 0.4, default: 0.4, required: false,
+    description: "Poids du Contrôle Continu dans la moyenne (0 à 1). Mettre 0 (avec examWeight=1) pour une matière à note unique — Stage, Soutenance, etc.",
+  })
+  @IsNumber()
+  @IsOptional()
+  @Min(0)
+  @Max(1)
+  ccWeight?: number;
+
+  @ApiProperty({
+    example: 0.6, default: 0.6, required: false,
+    description: 'Poids de l\'Examen Final dans la moyenne (0 à 1) — devrait compléter ccWeight à 1.',
+  })
+  @IsNumber()
+  @IsOptional()
+  @Min(0)
+  @Max(1)
+  examWeight?: number;
+
   @ApiProperty({ description: 'ID of the UE' })
   @IsString()
   @IsNotEmpty()
   ueId: string;
 
   @ApiProperty({ description: 'ID of the teacher (optional)', required: false })
+  @IsString()
+  @IsOptional()
+  teacherId?: string;
+}
+
+export class UpdateSubjectDto {
+  @ApiProperty({ required: false })
+  @IsString()
+  @IsOptional()
+  name?: string;
+
+  @ApiProperty({ required: false })
+  @IsNumber()
+  @IsOptional()
+  coefficient?: number;
+
+  @ApiProperty({ required: false })
+  @IsInt()
+  @IsOptional()
+  credits?: number;
+
+  @ApiProperty({ required: false })
+  @IsNumber()
+  @IsOptional()
+  @Min(0)
+  @Max(1)
+  ccWeight?: number;
+
+  @ApiProperty({ required: false })
+  @IsNumber()
+  @IsOptional()
+  @Min(0)
+  @Max(1)
+  examWeight?: number;
+
+  @ApiProperty({ required: false })
+  @IsString()
+  @IsOptional()
+  ueId?: string;
+
+  @ApiProperty({ required: false })
   @IsString()
   @IsOptional()
   teacherId?: string;
