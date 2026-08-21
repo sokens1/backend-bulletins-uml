@@ -1030,6 +1030,24 @@ ${body}
     return `AUTO-${stamp}-${rand}`;
   }
 
+  // A student created/updated via import only ever gets a plain `class` string on their own
+  // row — Gestion des Classes reads from the separate Class table, so without this an
+  // imported roster's class (e.g. "LP ASUR") would never show up there even though the
+  // students themselves exist. Used by both importGradesFromExcel and
+  // importStudentsFromExcel; never worth failing the whole import over.
+  private async ensureClassExists(className: string): Promise<void> {
+    const name = className?.trim();
+    if (!name) return;
+    const existing = await this.prisma.class.findUnique({ where: { name } });
+    if (!existing) {
+      try {
+        await this.prisma.class.create({ data: { name } });
+      } catch {
+        // Benign race (another row/import created it first) or an unexpected name clash.
+      }
+    }
+  }
+
   // Locates a relevé sheet's layout by scanning for its "Matière :" label and its "Élèves"
   // header — rather than assuming fixed row/column numbers. This is what lets the importer
   // accept BOTH our own generated canvas (logo header, Matière at row 7) AND the historical
@@ -1201,6 +1219,7 @@ ${body}
       return placeholderUE;
     };
 
+
     const NON_RELEVE_SHEET = ExportsService.NON_RELEVE_SHEET;
 
     // Each sheet is one subject's "relevé de notes" — the subject name is read from its
@@ -1253,6 +1272,7 @@ ${body}
       }
 
       const sheetClass = this.cellString(worksheet.getCell(layout.classeRow, layout.matiereCol)).trim();
+      await this.ensureClassExists(sheetClass);
 
       for (let i = layout.headerRow + 1; i <= worksheet.rowCount; i++) {
         const row = worksheet.getRow(i);
@@ -2691,6 +2711,7 @@ ${body}
 
         if (!studentId) continue; // blank row
 
+        await this.ensureClassExists(className);
         const existing = studentByMatricule.get(this.normalizeText(studentId));
 
         try {
