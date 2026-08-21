@@ -1349,14 +1349,21 @@ ${body}
       return ctx;
     };
 
-    // Lazily created once per semester touched: a holding UE for subjects that arrive via a
-    // relevé with no matching entry in realSubjectInfo (i.e. no recap sheet says which UE
-    // they belong to) — 0 credits so it never skews a semester average by itself, but its
-    // credits get incremented below as subjects actually land in it, since a UE stuck at 0
-    // divides the semester average and every credits-earned figure by zero.
+    // Every placeholder UE this import creates, uses, or moves a subject out of — credits
+    // for these are never adjusted with relative increment/decrement deltas (a previous
+    // version of this code did, and a single historical inconsistency from an older import
+    // run could then drift the total further out of sync on every subsequent import, with
+    // nothing to ever correct it back). Instead, each one gets its credits authoritatively
+    // RECOMPUTED from the subjects actually sitting in it once the whole file has been
+    // processed (see the loop right after the main sheet loop below) — self-correcting no
+    // matter how it got here. A real UE (with a code) has no such recompute: its credits
+    // come from the recap sheet once, at creation, and that stays authoritative.
+    const touchedPlaceholderUEIds = new Set<string>();
     const getOrCreatePlaceholderUE = async (semId: string, ctx: SemesterCtx) => {
-      if (ctx.placeholderUE) return ctx.placeholderUE;
-      ctx.placeholderUE = await this.prisma.uE.create({ data: { name: 'À classer', credits: 0, semesterId: semId } });
+      if (!ctx.placeholderUE) {
+        ctx.placeholderUE = await this.prisma.uE.create({ data: { name: 'À classer', credits: 0, semesterId: semId } });
+      }
+      touchedPlaceholderUEIds.add(ctx.placeholderUE.id);
       return ctx.placeholderUE;
     };
     const getOrCreateRealUE = async (semId: string, ctx: SemesterCtx, code: string, name: string, credits: number) => {
@@ -1386,21 +1393,14 @@ ${body}
       ctx: SemesterCtx,
       subjectRef: string,
     ) => {
+      touchedPlaceholderUEIds.add(subj.ueId); // always a placeholder — see unclassifiedByName above
       const info = realSubjectInfo.get(this.normalizeText(subjectRef));
       const targetUE = info
         ? await getOrCreateRealUE(sheetSemesterId, ctx, info.ueCode, info.ueName, realUeInfo.get(info.ueCode)?.credits ?? info.credits)
         : await getOrCreatePlaceholderUE(sheetSemesterId, ctx);
       if (targetUE.id === subj.ueId) return subj; // already exactly where it belongs
       const data = info ? { ueId: targetUE.id, credits: info.credits, coefficient: info.coefficient } : { ueId: targetUE.id };
-      const updated = await this.prisma.subject.update({ where: { id: subj.id }, data });
-      await this.prisma.uE.update({ where: { id: subj.ueId }, data: { credits: { decrement: subj.credits ?? 0 } } });
-      if (!info) {
-        // Moving between two placeholders (different semester) still needs the destination's
-        // running total kept in sync — the "real UE" branch already got its own credits value
-        // at creation/lookup time, nothing to add there.
-        await this.prisma.uE.update({ where: { id: targetUE.id }, data: { credits: { increment: subj.credits ?? 0 } } });
-      }
-      return updated;
+      return this.prisma.subject.update({ where: { id: subj.id }, data });
     };
 
     const NON_RELEVE_SHEET = ExportsService.NON_RELEVE_SHEET;
@@ -1485,7 +1485,6 @@ ${body}
             ueId = ue.id;
             subjectCredits = 2; // schema default — no recap sheet to read a real one from
             subjectCoefficient = Number.isFinite(coeffCell) && coeffCell > 0 ? coeffCell : 1;
-            await this.prisma.uE.update({ where: { id: ue.id }, data: { credits: { increment: subjectCredits } } });
           }
 
           subject = await this.prisma.subject.create({
@@ -1580,6 +1579,22 @@ ${body}
           errors.push(`${worksheet.name} - Ligne ${i} (${student.studentId}): ${e instanceof Error ? e.message : 'erreur inconnue'}`);
         }
       }
+    }
+
+    // Authoritative recompute, not another relative delta — see touchedPlaceholderUEIds'
+    // own comment above for why: whatever a placeholder UE's credits happened to already be
+    // (including corrupted by an older import run) is irrelevant, it becomes exactly the sum
+    // of whatever subjects are actually sitting in it right now. One fully drained by this
+    // same import (every subject migrated out, nothing left) is deleted outright instead of
+    // lingering as an empty "À classer" line in every report from now on.
+    for (const ueId of touchedPlaceholderUEIds) {
+      const subjectsIn = await this.prisma.subject.findMany({ where: { ueId } });
+      if (subjectsIn.length === 0) {
+        try { await this.prisma.uE.delete({ where: { id: ueId } }); } catch { /* best-effort cleanup */ }
+        continue;
+      }
+      const total = subjectsIn.reduce((sum, s) => sum + (s.credits ?? 0), 0);
+      await this.prisma.uE.update({ where: { id: ueId }, data: { credits: total } });
     }
 
     if (!anyReleveSheetFound) {
