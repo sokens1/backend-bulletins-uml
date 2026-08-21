@@ -1022,6 +1022,15 @@ ${body}
     // is read from the fixed "Matière :" cell rather than the sheet tab (which is
     // sanitized/truncated for Excel and isn't reliable for matching).
     for (const worksheet of workbook.worksheets) {
+      if (worksheet.name === 'Absences') {
+        const abs = await this.importAbsencesSheet(worksheet, semesterId, userId, studentById, studentByMatricule);
+        count += abs.count;
+        skipped += abs.skipped;
+        errors.push(...abs.errors);
+        continue;
+      }
+      if (worksheet.name === 'FV' || worksheet.name === 'TabNote' || worksheet.name === 'Bulletin') continue; // roster/read-only/preview sheets
+
       const subjectRef = worksheet.getCell(R.MATIERE_ROW, R.MATIERE_COL).toString().trim();
       const headerLabel = worksheet.getCell(R.HEADER_ROW, R.COL_MATRICULE).toString().trim();
       if (!subjectRef || !headerLabel.toLowerCase().startsWith('matricule')) continue; // not a relevé sheet
@@ -1132,6 +1141,80 @@ ${body}
     };
   }
 
+  // Parses the "Absences" sheet (see buildAbsencesSheet: N°/Matricule/Élèves + one column
+  // per subject). Upserts by (studentId, subjectId) — Attendance has no unique constraint,
+  // so blindly calling enterAttendance again on a re-import would duplicate the hours
+  // instead of correcting them.
+  private async importAbsencesSheet(
+    worksheet: ExcelJS.Worksheet,
+    semesterId: string,
+    userId: string,
+    studentById: Map<string, { id: string; studentId: string }>,
+    studentByMatricule: Map<string, { id: string; studentId: string }>,
+  ) {
+    let count = 0;
+    let skipped = 0;
+    const errors: string[] = [];
+
+    const headerRow = worksheet.getRow(9);
+    if (headerRow.getCell(2).toString().trim().toLowerCase() !== 'matricule') {
+      return { count, skipped, errors }; // not a recognized Absences layout
+    }
+
+    const subjects = await this.prisma.subject.findMany({ where: { ue: { semesterId } } });
+    const subjectByName = new Map(subjects.map((s) => [this.normalizeText(s.name), s]));
+    const subjectColumns: { col: number; subjectId: string }[] = [];
+    for (let c = 4; c <= worksheet.columnCount; c++) {
+      const header = headerRow.getCell(c).toString().trim();
+      if (!header) continue;
+      const subject = subjectByName.get(this.normalizeText(header));
+      if (subject) subjectColumns.push({ col: c, subjectId: subject.id });
+    }
+
+    const existingAttendances = await this.prisma.attendance.findMany({ where: { subject: { ue: { semesterId } } } });
+    const attendanceKey = (studentId: string, subjectId: string) => `${studentId}::${subjectId}`;
+    const attendanceByKey = new Map(existingAttendances.map((a) => [attendanceKey(a.studentId, a.subjectId), a]));
+
+    for (let i = 10; i <= worksheet.rowCount; i++) {
+      const row = worksheet.getRow(i);
+      const studentRef = row.getCell(2).toString().trim();
+      if (!studentRef) break;
+
+      const student = studentById.get(studentRef) ?? studentByMatricule.get(this.normalizeText(studentRef));
+      if (!student) {
+        skipped++;
+        errors.push(`Absences - Ligne ${i}: étudiant introuvable ("${studentRef}")`);
+        continue;
+      }
+
+      for (const { col, subjectId } of subjectColumns) {
+        const raw = row.getCell(col).toString().trim();
+        if (raw === '') continue;
+        const hours = Number(raw.replace(',', '.'));
+        if (!Number.isFinite(hours) || hours < 0) {
+          skipped++;
+          errors.push(`Absences - Ligne ${i} (${student.studentId}): heures invalides ("${raw}")`);
+          continue;
+        }
+
+        try {
+          const existing = attendanceByKey.get(attendanceKey(student.id, subjectId));
+          if (existing) {
+            await this.gradesService.updateAttendance(existing.id, { studentId: student.id, subjectId, hoursAbsent: hours }, userId);
+          } else {
+            await this.gradesService.enterAttendance({ studentId: student.id, subjectId, hoursAbsent: hours }, userId);
+          }
+          count++;
+        } catch (e) {
+          skipped++;
+          errors.push(`Absences - Ligne ${i} (${student.studentId}): ${e instanceof Error ? e.message : 'erreur inconnue'}`);
+        }
+      }
+    }
+
+    return { count, skipped, errors };
+  }
+
   private styleTemplateHeaderRow(worksheet: ExcelJS.Worksheet) {
     worksheet.getRow(1).font = { bold: true };
     worksheet.getRow(1).fill = {
@@ -1233,6 +1316,44 @@ ${body}
             tabColor: ueColors.get(ueName)!,
           }, usedSheetNames);
         }
+
+        this.buildAbsencesSheet(workbook, {
+          className: students[0]?.class,
+          year: semester?.year,
+          semesterName: semester?.name,
+          subjects: effectiveSubjects,
+          students: effectiveStudents,
+          logoImageId,
+        });
+
+        // TabNote + Bulletin only make sense against real data, and only once real
+        // students/subjects exist (not the single-sample fallback used for a preview
+        // template with no semester context).
+        if (semesterId && subjects.length > 0 && students.length > 0) {
+          const { reportsByStudentId } = await this.gradesService.computeSemesterReports(semesterId);
+          const orderedReports = students
+            .map((s) => reportsByStudentId.get(s.id))
+            .filter((r): r is NonNullable<typeof r> => !!r);
+          const ueNames = [...new Set(subjects.map((s) => s.ue?.name || 'UE'))];
+
+          this.buildTabNoteSheet(workbook, {
+            className: students[0]?.class,
+            year: semester?.year,
+            semesterName: semester?.name,
+            ueNames,
+            reports: orderedReports,
+            logoImageId,
+          });
+
+          this.buildBulletinSheet(workbook, {
+            className: students[0]?.class,
+            year: semester?.year,
+            semesterName: semester?.name,
+            ueNames,
+            studentCount: orderedReports.length,
+            logoImageId,
+          });
+        }
       }
     }
 
@@ -1259,6 +1380,10 @@ ${body}
     HEADER_ROW: 11,
     COL_NUM: 1, COL_MATRICULE: 2, COL_ELEVE: 3, COL_CC: 4, COL_EXAM: 5, COL_RATTR: 6, COL_MOY: 7,
   } as const;
+
+  // Header row of the TabNote sheet — the Bulletin sheet's INDEX() formulas are built
+  // against this exact row, so the two stay in sync by construction.
+  private static readonly TABNOTE_HEADER_ROW = 8;
 
   private buildReleveSheet(
     workbook: ExcelJS.Workbook,
@@ -1446,6 +1571,192 @@ ${body}
     }
     used.add(name);
     return name;
+  }
+
+  private drawSheetHeader(ws: ExcelJS.Worksheet, cols: number, title: string, logoImageId?: number | null) {
+    ws.getRow(1).height = 20;
+    ws.getRow(2).height = 20;
+    if (logoImageId != null) {
+      ws.addImage(logoImageId, { tl: { col: 0.2, row: 0.1 }, ext: { width: 44, height: 36 } });
+    }
+    const centerBold = (cell: ExcelJS.Cell, size = 9) => { cell.font = { bold: true, size }; cell.alignment = { horizontal: 'center' }; };
+    ws.mergeCells(1, 1, 1, cols);
+    centerBold(ws.getCell(1, 1));
+    ws.getCell(1, 1).value = 'INSTITUT NATIONAL DE LA POSTE, DES TECHNOLOGIES DE L\'INFORMATION ET DE LA COMMUNICATION';
+    ws.mergeCells(2, 1, 2, cols);
+    centerBold(ws.getCell(2, 1));
+    ws.getCell(2, 1).value = 'DIRECTION DES ETUDES ET DE LA PEDAGOGIE';
+    ws.mergeCells(4, 1, 4, cols);
+    const titleCell = ws.getCell(4, 1);
+    titleCell.value = title;
+    titleCell.font = { bold: true, size: 13 };
+    titleCell.alignment = { horizontal: 'center' };
+  }
+
+  // Converts a 1-based column index to its Excel letter (1 -> A, 27 -> AA, ...).
+  private columnLetter(n: number): string {
+    let s = '';
+    while (n > 0) {
+      const rem = (n - 1) % 26;
+      s = String.fromCharCode(65 + rem) + s;
+      n = Math.floor((n - 1) / 26);
+    }
+    return s;
+  }
+
+  // Single consolidated "Absences" sheet (one column per subject, pivoted like the grades
+  // relevé) — mirrors the reference workbook's Absences tab and is imported back the same
+  // way, upserting Attendance rows instead of duplicating them on a re-import.
+  private buildAbsencesSheet(
+    workbook: ExcelJS.Workbook,
+    data: {
+      className?: string; year?: string; semesterName?: string;
+      subjects: { name: string }[];
+      students: { studentId: string; lastName: string; firstName: string }[];
+      logoImageId?: number | null;
+    },
+  ) {
+    const cols = 3 + data.subjects.length;
+    const ws = workbook.addWorksheet('Absences', { properties: { tabColor: { argb: 'FFED7D31' } } });
+    ws.columns = [{ width: 6 }, { width: 18 }, { width: 30 }, ...data.subjects.map(() => ({ width: 16 }))];
+    this.drawSheetHeader(ws, cols, 'SUIVI DES ABSENCES (heures)', data.logoImageId);
+
+    ws.getCell(6, 1).value = 'Classe :';
+    ws.getCell(6, 2).value = data.className || '';
+    ws.getCell(6, 3).value = 'Année :';
+    ws.getCell(6, 4).value = data.year || '';
+    ws.getCell(7, 1).value = 'Semestre :';
+    ws.getCell(7, 2).value = data.semesterName || '';
+
+    const headerRow = ws.getRow(9);
+    headerRow.values = ['N°', 'Matricule', 'Élèves', ...data.subjects.map((s) => s.name)];
+    headerRow.font = { bold: true };
+    headerRow.alignment = { horizontal: 'center', wrapText: true };
+    headerRow.eachCell((cell) => {
+      cell.fill = { type: 'pattern', pattern: 'solid', fgColor: { argb: 'FFE0E0E0' } };
+      cell.border = { top: { style: 'thin' }, bottom: { style: 'thin' }, left: { style: 'thin' }, right: { style: 'thin' } };
+    });
+
+    data.students.forEach((student, idx) => {
+      const row = ws.getRow(10 + idx);
+      row.getCell(1).value = idx + 1;
+      row.getCell(2).value = student.studentId;
+      row.getCell(3).value = `${student.lastName} ${student.firstName}`;
+    });
+
+    ws.getCell(9, 2).note =
+      'Une colonne par matière : indiquez le nombre d\'heures d\'absence, laissez vide sinon. ' +
+      'Ne modifiez pas les en-têtes de colonnes : ils servent à retrouver la matière lors de l\'import.';
+    ws.views = [{ state: 'frozen', ySplit: 9 }];
+  }
+
+  // Read-only consolidated recap (one row per student: per-UE averages, semester average,
+  // credits, rank, decision) — mirrors "TabNotS5" in the reference workbook. Computed live
+  // from the database, not read back on import (the Bulletin sheet below pulls from it
+  // via formulas for a single-student dynamic view).
+  private buildTabNoteSheet(
+    workbook: ExcelJS.Workbook,
+    data: {
+      className?: string; year?: string; semesterName?: string;
+      ueNames: string[];
+      reports: { student: { studentId: string; lastName: string; firstName: string }; report: { ueName: string; average: number }[]; semesterAverage: number; totalCreditsWon: number; totalCreditsExpected: number; rank: number; creditValidationStatus: string }[];
+      logoImageId?: number | null;
+    },
+  ) {
+    const fixedCols = 4; // N°, Matricule, Nom, Prénom
+    const cols = fixedCols + data.ueNames.length + 4; // + Moyenne, Crédits, Rang, Décision
+    const ws = workbook.addWorksheet('TabNote', { properties: { tabColor: { argb: 'FF7F7F7F' } } });
+    ws.columns = [
+      { width: 6 }, { width: 18 }, { width: 20 }, { width: 20 },
+      ...data.ueNames.map(() => ({ width: 14 })),
+      { width: 14 }, { width: 14 }, { width: 8 }, { width: 22 },
+    ];
+    this.drawSheetHeader(ws, cols, `TABLEAU RÉCAPITULATIF DES NOTES — ${data.semesterName || ''}`, data.logoImageId);
+
+    ws.getCell(6, 1).value = 'Classe :';
+    ws.getCell(6, 2).value = data.className || '';
+    ws.getCell(6, 3).value = 'Année :';
+    ws.getCell(6, 4).value = data.year || '';
+
+    const headerRow = ws.getRow(ExportsService.TABNOTE_HEADER_ROW);
+    headerRow.values = [
+      'N°', 'Matricule', 'Nom', 'Prénom',
+      ...data.ueNames,
+      'Moyenne Semestre', 'Crédits Acquis', 'Rang', 'Décision',
+    ];
+    headerRow.font = { bold: true };
+    headerRow.alignment = { horizontal: 'center', wrapText: true };
+    headerRow.eachCell((cell) => {
+      cell.fill = { type: 'pattern', pattern: 'solid', fgColor: { argb: 'FFE0E0E0' } };
+      cell.border = { top: { style: 'thin' }, bottom: { style: 'thin' }, left: { style: 'thin' }, right: { style: 'thin' } };
+    });
+
+    data.reports.forEach((r, idx) => {
+      const row = ws.getRow(ExportsService.TABNOTE_HEADER_ROW + 1 + idx);
+      const ueAvgByName = new Map(r.report.map((ue) => [ue.ueName, ue.average]));
+      row.values = [
+        idx + 1, r.student.studentId, r.student.lastName, r.student.firstName,
+        ...data.ueNames.map((name) => ueAvgByName.get(name) ?? ''),
+        r.semesterAverage, `${r.totalCreditsWon}/${r.totalCreditsExpected}`, r.rank, r.creditValidationStatus,
+      ];
+    });
+
+    ws.getCell(4, 1).note = 'Lecture seule — générée automatiquement depuis les notes déjà saisies. Non lue à l\'import.';
+    ws.views = [{ state: 'frozen', ySplit: ExportsService.TABNOTE_HEADER_ROW }];
+  }
+
+  // One-student "mini-bulletin" that updates live as you change the N° cell — pulls every
+  // value from TabNote via INDEX (row = header row + N°) instead of a fixed snapshot,
+  // mirroring how the reference workbook's own BULLETIN sheet looked up a student by number.
+  private buildBulletinSheet(
+    workbook: ExcelJS.Workbook,
+    data: { className?: string; year?: string; semesterName?: string; ueNames: string[]; studentCount: number; logoImageId?: number | null },
+  ) {
+    const ws = workbook.addWorksheet('Bulletin', { properties: { tabColor: { argb: 'FFFFD966' } } });
+    ws.columns = [{ width: 24 }, { width: 30 }];
+    this.drawSheetHeader(ws, 2, 'BULLETIN DE NOTES (aperçu dynamique)', data.logoImageId);
+
+    ws.getCell(6, 1).value = 'Classe :';
+    ws.getCell(6, 2).value = data.className || '';
+    ws.getCell(7, 1).value = 'Année / Semestre :';
+    ws.getCell(7, 2).value = `${data.year || ''} — ${data.semesterName || ''}`;
+
+    const selectorRow = 9;
+    ws.getCell(selectorRow, 1).value = `N° de l'étudiant (1 à ${data.studentCount}) :`;
+    ws.getCell(selectorRow, 1).font = { bold: true };
+    const selectorCell = ws.getCell(selectorRow, 2);
+    selectorCell.value = 1;
+    selectorCell.font = { bold: true, size: 14 };
+    selectorCell.fill = { type: 'pattern', pattern: 'solid', fgColor: { argb: 'FFFFE699' } };
+    selectorCell.alignment = { horizontal: 'center' };
+    selectorCell.border = { top: { style: 'medium' }, bottom: { style: 'medium' }, left: { style: 'medium' }, right: { style: 'medium' } };
+    selectorCell.note = `Changez ce nombre (1 à ${data.studentCount}) pour afficher le bulletin d'un autre étudiant — tout ci-dessous se met à jour automatiquement.`;
+
+    const T = ExportsService.TABNOTE_HEADER_ROW;
+    const rowRef = `${T}+$B$${selectorRow}`;
+    const idx = (col: number) => `INDEX(TabNote!${this.columnLetter(col)}:${this.columnLetter(col)},${rowRef})`;
+
+    let r = selectorRow + 2;
+    const field = (label: string, formula: string, bold = false) => {
+      ws.getCell(r, 1).value = label;
+      ws.getCell(r, 1).font = { bold: true };
+      const cell = ws.getCell(r, 2);
+      cell.value = { formula };
+      if (bold) cell.font = { bold: true, size: 12 };
+      r += 1;
+    };
+
+    field('Matricule', idx(2));
+    field('Nom et Prénom', `${idx(3)}&" "&${idx(4)}`);
+    r += 1;
+    data.ueNames.forEach((name, i) => field(`Moyenne ${name}`, idx(5 + i)));
+    r += 1;
+    field('Moyenne Semestre', idx(5 + data.ueNames.length), true);
+    field('Crédits Acquis', idx(6 + data.ueNames.length));
+    field('Rang', idx(7 + data.ueNames.length));
+    field('Décision', idx(8 + data.ueNames.length), true);
+
+    ws.views = [{ state: 'frozen', ySplit: selectorRow }];
   }
 
   // Real data export (as opposed to generateTemplate, which is always a blank canvas) —
