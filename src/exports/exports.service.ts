@@ -961,6 +961,27 @@ ${body}
     return { value };
   }
 
+  // Best-effort split of the relevé's single "Élèves" cell ("NOM(S) Prénom(s)", surnames in
+  // caps per the school's own convention) into lastName/firstName for a newly-created student.
+  // Never blocks the import — worst case the admin fixes the split in Gestion Étudiants.
+  private splitEleveName(raw: string): { lastName: string; firstName: string } {
+    const words = raw.trim().split(/\s+/).filter(Boolean);
+    if (words.length === 0) return { lastName: '(à compléter)', firstName: '(à compléter)' };
+    let i = 0;
+    while (i < words.length - 1 && words[i] === words[i].toLocaleUpperCase('fr-FR') && /[A-ZÀ-Ÿ]/.test(words[i])) i++;
+    if (i === 0) i = 1;
+    return {
+      lastName: words.slice(0, i).join(' '),
+      firstName: words.slice(i).join(' ') || '(à compléter)',
+    };
+  }
+
+  private slugifyForEmail(text: string): string {
+    return text
+      .normalize('NFD').replace(/[̀-ͯ]/g, '')
+      .toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-+|-+$/g, '') || 'etudiant';
+  }
+
   async importGradesFromExcel(buffer: Buffer, semesterId: string, userId: string) {
     const workbook = new ExcelJS.Workbook();
     await workbook.xlsx.load(buffer as any);
@@ -980,8 +1001,22 @@ ${body}
     let count = 0;
     let skipped = 0;
     const errors: string[] = [];
+    const createdSubjects: string[] = [];
+    const createdStudents: string[] = [];
     let anyReleveSheetFound = false;
     const R = ExportsService.RELEVE;
+
+    // Lazily created once per import: a holding UE for subjects that arrive via a relevé but
+    // don't exist yet — the relevé has no way to say which UE a subject belongs to, so it
+    // lands here (0 credits, doesn't skew any average) until an admin moves it in Gestion
+    // Académique.
+    let placeholderUE: { id: string } | null = null;
+    const getOrCreatePlaceholderUE = async () => {
+      if (placeholderUE) return placeholderUE;
+      const existing = await this.prisma.uE.findFirst({ where: { semesterId, name: 'À classer' } });
+      placeholderUE = existing ?? await this.prisma.uE.create({ data: { name: 'À classer', credits: 0, semesterId } });
+      return placeholderUE;
+    };
 
     // Each sheet is one subject's "relevé de notes" (see buildReleveSheet) — the subject
     // is read from the fixed "Matière :" cell rather than the sheet tab (which is
@@ -992,23 +1027,65 @@ ${body}
       if (!subjectRef || !headerLabel.toLowerCase().startsWith('matricule')) continue; // not a relevé sheet
       anyReleveSheetFound = true;
 
-      const subject = subjectById.get(subjectRef) ?? subjectByName.get(this.normalizeText(subjectRef));
+      let subject = subjectById.get(subjectRef) ?? subjectByName.get(this.normalizeText(subjectRef));
       if (!subject) {
-        skipped++;
-        errors.push(`${worksheet.name}: matière introuvable pour ce semestre ("${subjectRef}")`);
-        continue;
+        try {
+          const ue = await getOrCreatePlaceholderUE();
+          const coeffCell = Number(worksheet.getCell(8, 2).value);
+          const teacherName = worksheet.getCell(9, 2).toString().trim();
+          let teacher: { id: string } | null = null;
+          if (teacherName) {
+            const allTeachers = await this.prisma.teacher.findMany();
+            teacher = allTeachers.find((t) => this.normalizeText(`${t.firstName} ${t.lastName}`) === this.normalizeText(teacherName)) ?? null;
+          }
+          subject = await this.prisma.subject.create({
+            data: {
+              name: subjectRef,
+              coefficient: Number.isFinite(coeffCell) && coeffCell > 0 ? coeffCell : 1,
+              ueId: ue.id,
+              teacherId: teacher?.id,
+            },
+          });
+          subjectById.set(subject.id, subject);
+          subjectByName.set(this.normalizeText(subject.name), subject);
+          createdSubjects.push(subject.name);
+        } catch (e) {
+          skipped++;
+          errors.push(`${worksheet.name}: échec de création de la matière ("${subjectRef}") — ${e instanceof Error ? e.message : 'erreur inconnue'}`);
+          continue;
+        }
       }
+
+      const sheetClass = worksheet.getCell(6, 2).toString().trim();
 
       for (let i = R.HEADER_ROW + 1; i <= worksheet.rowCount; i++) {
         const row = worksheet.getRow(i);
         const studentRef = row.getCell(R.COL_MATRICULE).toString().trim();
         if (!studentRef) break; // end of the student list for this sheet
 
-        const student = studentById.get(studentRef) ?? studentByMatricule.get(this.normalizeText(studentRef));
+        let student = studentById.get(studentRef) ?? studentByMatricule.get(this.normalizeText(studentRef));
         if (!student) {
-          skipped++;
-          errors.push(`${worksheet.name} - Ligne ${i}: étudiant introuvable ("${studentRef}")`);
-          continue;
+          try {
+            const eleveName = row.getCell(R.COL_ELEVE).toString().trim();
+            const { lastName, firstName } = this.splitEleveName(eleveName);
+            const created = await this.usersService.createStudent({
+              studentId: studentRef,
+              lastName,
+              firstName,
+              email: `${this.slugifyForEmail(studentRef)}@a-completer.inptic.ga`,
+              class: sheetClass || '(à compléter)',
+              password: 'Inptic2024!',
+            });
+            student = created.student!; // just created together with the user above, always present
+            studentById.set(student.id, student);
+            studentByMatricule.set(this.normalizeText(student.studentId), student);
+            createdStudents.push(`${studentRef} (${lastName} ${firstName})`);
+          } catch (e) {
+            skipped++;
+            errors.push(`${worksheet.name} - Ligne ${i}: échec de création de l'étudiant ("${studentRef}") — ${e instanceof Error ? e.message : 'erreur inconnue'}`);
+            continue;
+          }
+          if (!student) continue; // unreachable in practice, satisfies control-flow narrowing below
         }
 
         const cc = this.parseGradeCell(row.getCell(R.COL_CC).toString().trim(), 'Note CC');
@@ -1047,7 +1124,12 @@ ${body}
       );
     }
 
-    return { imported: count, skipped, errors };
+    return {
+      imported: count,
+      skipped,
+      errors,
+      created: { subjects: createdSubjects, students: createdStudents },
+    };
   }
 
   private styleTemplateHeaderRow(worksheet: ExcelJS.Worksheet) {
