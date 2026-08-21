@@ -1253,10 +1253,12 @@ ${body}
             const allTeachers = await this.prisma.teacher.findMany();
             teacher = allTeachers.find((t) => this.normalizeText(`${t.firstName} ${t.lastName}`) === this.normalizeText(teacherName)) ?? null;
           }
+          const subjectCredits = 2; // schema default — the relevé has no credits column to read
           subject = await this.prisma.subject.create({
             data: {
               name: subjectRef,
               coefficient: Number.isFinite(coeffCell) && coeffCell > 0 ? coeffCell : 1,
+              credits: subjectCredits,
               ueId: ue.id,
               teacherId: teacher?.id,
             },
@@ -1264,6 +1266,14 @@ ${body}
           subjectById.set(subject.id, subject);
           subjectByName.set(this.normalizeText(subject.name), subject);
           createdSubjects.push(subject.name);
+
+          // The placeholder UE starts at 0 credits ("doesn't skew any average" — see
+          // getOrCreatePlaceholderUE) but that's only true while it's EMPTY: once subjects
+          // land in it, a UE stuck at 0 credits divides the semester average and every
+          // credits-earned computation by zero, silently reporting "Moyenne Semestre 0/20,
+          // 0 crédits" even though every individual subject grade imported correctly. Its
+          // credits must track the subjects actually placed there.
+          await this.prisma.uE.update({ where: { id: ue.id }, data: { credits: { increment: subjectCredits } } });
         } catch (e) {
           skipped++;
           errors.push(`${worksheet.name}: échec de création de la matière ("${subjectRef}") — ${e instanceof Error ? e.message : 'erreur inconnue'}`);
