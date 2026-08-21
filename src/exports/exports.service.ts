@@ -1015,6 +1015,15 @@ ${body}
     const subjectById = new Map(subjects.map((s) => [s.id, s]));
     const subjectByName = new Map(subjects.map((s) => [this.normalizeText(s.name), s]));
 
+    // Snapshot of grades that already existed BEFORE this import pass. Re-importing a
+    // relevé after a retake session is how rattrapage gets recorded: if a student already
+    // had an exam grade for a subject, the new Examen value in the sheet is treated as the
+    // rattrapage (which fully replaces the CC/Examen average — see computeSubjectAverage)
+    // instead of overwriting examGrade.
+    const existingGrades = await this.prisma.grade.findMany({ where: { subject: { ue: { semesterId } } } });
+    const existingGradeKey = (studentId: string, subjectId: string) => `${studentId}::${subjectId}`;
+    const existingGradeByKey = new Map(existingGrades.map((g) => [existingGradeKey(g.studentId, g.subjectId), g]));
+
     let count = 0;
     let skipped = 0;
     const errors: string[] = [];
@@ -1124,24 +1133,30 @@ ${body}
 
         const cc = this.parseGradeCell(row.getCell(R.COL_CC).toString().trim(), 'Note CC');
         const exam = this.parseGradeCell(row.getCell(R.COL_EXAM).toString().trim(), 'Note Examen');
-        const rattr = this.parseGradeCell(row.getCell(R.COL_RATTR).toString().trim(), 'Note Rattrapage');
-        const rowErrors = [cc.error, exam.error, rattr.error].filter(Boolean);
+        const rowErrors = [cc.error, exam.error].filter(Boolean);
         if (rowErrors.length > 0) {
           skipped++;
           errors.push(`${worksheet.name} - Ligne ${i} (${student.studentId}): ${rowErrors.join(', ')}`);
           continue;
         }
-        if (cc.value === undefined && exam.value === undefined && rattr.value === undefined) {
+        if (cc.value === undefined && exam.value === undefined) {
           continue; // left blank for this student — not an error
         }
+
+        // A subject already had an exam grade before this import → this Examen value is a
+        // rattrapage (retake), not a first-time exam entry. It replaces the average
+        // entirely (computeSubjectAverage), so it's routed to rattrapageGrade and the
+        // original examGrade is left untouched.
+        const existing = existingGradeByKey.get(existingGradeKey(student.id, subject.id));
+        const isRetake = existing?.examGrade != null && exam.value !== undefined;
 
         try {
           await this.gradesService.enterGrade({
               studentId: student.id,
               subjectId: subject.id,
               ccGrade: cc.value,
-              examGrade: exam.value,
-              rattrapageGrade: rattr.value,
+              examGrade: isRetake ? undefined : exam.value,
+              rattrapageGrade: isRetake ? exam.value : undefined,
           }, userId);
           count++;
         } catch (e) {
@@ -1360,18 +1375,34 @@ ${body}
         // students/subjects exist (not the single-sample fallback used for a preview
         // template with no semester context).
         if (semesterId && subjects.length > 0 && students.length > 0) {
-          const { reportsByStudentId } = await this.gradesService.computeSemesterReports(semesterId);
+          const precomputed = await this.gradesService.computeSemesterReports(semesterId);
+          const { reportsByStudentId } = precomputed;
           const orderedReports = students
             .map((s) => reportsByStudentId.get(s.id))
             .filter((r): r is NonNullable<typeof r> => !!r);
-          const ueNames = [...new Set(subjects.map((s) => s.ue?.name || 'UE'))];
+
+          // Group subjects by UE (preserving DB order) so TabNote/Bulletin's column layout
+          // mirrors the reference workbook's per-UE subject blocks exactly.
+          const ueGroups: { ueName: string; ueCode?: string | null; subjects: { name: string; credits: number; coefficient: number }[] }[] = [];
+          for (const s of subjects) {
+            const ueName = s.ue?.name || 'UE';
+            let group = ueGroups.find((g) => g.ueName === ueName);
+            if (!group) {
+              group = { ueName, ueCode: (s.ue as any)?.code, subjects: [] };
+              ueGroups.push(group);
+            }
+            group.subjects.push({ name: s.name, credits: s.credits, coefficient: s.coefficient });
+          }
+
+          const { subjectStats } = await this.gradesService.getPromotionStats(semesterId, precomputed);
+          const classAverages = new Map(subjectStats.map((s) => [s.subjectName, s.average]));
 
           this.buildTabNoteSheet(workbook, {
             className: students[0]?.class,
             year: semester?.year,
             semesterName: semester?.name,
-            ueNames,
-            reports: orderedReports,
+            ueGroups,
+            reports: orderedReports as any,
             logoImageId,
           });
 
@@ -1379,7 +1410,8 @@ ${body}
             className: students[0]?.class,
             year: semester?.year,
             semesterName: semester?.name,
-            ueNames,
+            ueGroups,
+            classAverages,
             studentCount: orderedReports.length,
             logoImageId,
           });
@@ -1409,15 +1441,45 @@ ${body}
   // identified students by name only. Matricule stays the authoritative ID in Gestion
   // Étudiants; a new student created from a relevé import gets one auto-generated (see
   // importGradesFromExcel) but it isn't shown here.
+  // No Rattrapage column either — the reference workbook doesn't have one, because a
+  // rattrapage grade *replaces* the subject average entirely (see computeSubjectAverage).
+  // Re-importing the same sheet after a retake session naturally implements that: if a
+  // Grade already exists for that (student, subject), the Examen value goes to
+  // rattrapageGrade instead of examGrade (see importGradesFromExcel).
   private static readonly RELEVE = {
     MATIERE_ROW: 7, MATIERE_COL: 2,
     HEADER_ROW: 11,
-    COL_NUM: 1, COL_ELEVE: 2, COL_CC: 3, COL_EXAM: 4, COL_RATTR: 5, COL_MOY: 6,
+    COL_NUM: 1, COL_ELEVE: 2, COL_CC: 3, COL_EXAM: 4, COL_MOY: 5,
   } as const;
 
-  // Header row of the TabNote sheet — the Bulletin sheet's INDEX() formulas are built
-  // against this exact row, so the two stay in sync by construction.
-  private static readonly TABNOTE_HEADER_ROW = 8;
+  // TabNote header rows, reproducing the reference workbook's TabNotS5 layout: a 2-row-tall
+  // "UEx-y : Nom" banner per UE group, then a "Matières"/"Crédits"/"Coefficients" 3-row
+  // sub-header under each subject column. The Bulletin sheet's INDEX() formulas are built
+  // against DATA_START, so the two stay in sync by construction.
+  private static readonly TABNOTE_UEBANNER_ROW = 8; // merged rows 8-9
+  private static readonly TABNOTE_MATIERES_ROW = 10;
+  private static readonly TABNOTE_CREDITS_ROW = 11;
+  private static readonly TABNOTE_COEF_ROW = 12;
+  private static readonly TABNOTE_DATA_START = 13;
+
+  // Mirrors calculateAnnualReport / generateBulletinPdf's mention scale — below 10/20 gets
+  // no mention at all rather than defaulting to "Passable".
+  private mentionFor(avg: number): string {
+    if (avg >= 16) return 'Très Bien';
+    if (avg >= 14) return 'Bien';
+    if (avg >= 12) return 'Assez Bien';
+    if (avg >= 10) return 'Passable';
+    return 'Non attribuée';
+  }
+
+  private formatBirthInfo(student: { birthDate?: Date | string | null; birthPlace?: string | null }): string {
+    if (!student.birthDate) return '';
+    const d = new Date(student.birthDate);
+    const day = String(d.getUTCDate()).padStart(2, '0');
+    const month = String(d.getUTCMonth() + 1).padStart(2, '0');
+    const year = d.getUTCFullYear();
+    return `Né(e) le ${day}/${month}/${year}${student.birthPlace ? ` à ${student.birthPlace}` : ''}`;
+  }
 
   private buildReleveSheet(
     workbook: ExcelJS.Workbook,
@@ -1439,16 +1501,16 @@ ${body}
     const R = ExportsService.RELEVE;
     const sheetName = this.uniqueSheetName(data.subjectName, usedSheetNames);
     const ws = workbook.addWorksheet(sheetName, data.tabColor ? { properties: { tabColor: { argb: data.tabColor } } } : undefined);
-    const cols = 6;
+    const cols = 5;
     ws.columns = [
-      { width: 6 }, { width: 40 }, { width: 16 }, { width: 16 }, { width: 14 }, { width: 12 },
+      { width: 6 }, { width: 40 }, { width: 16 }, { width: 16 }, { width: 12 },
     ];
     this.drawSheetHeader(ws, cols, 'RELEVE DE NOTES', data.logoImageId);
 
     ws.getCell(6, 1).value = 'Classe :';
     ws.getCell(6, 2).value = data.className || '';
-    ws.getCell(6, 5).value = 'Année :';
-    ws.getCell(6, 6).value = data.year || '';
+    ws.getCell(6, 4).value = 'Année :';
+    ws.getCell(6, 5).value = data.year || '';
 
     ws.getCell(R.MATIERE_ROW, 1).value = 'Matière :';
     ws.getCell(R.MATIERE_ROW, R.MATIERE_COL).value = data.subjectName;
@@ -1456,8 +1518,8 @@ ${body}
 
     ws.getCell(8, 1).value = 'Coefficient :';
     ws.getCell(8, 2).value = data.coefficient;
-    ws.getCell(8, 5).value = 'Semestre :';
-    ws.getCell(8, 6).value = data.semesterName || '';
+    ws.getCell(8, 4).value = 'Semestre :';
+    ws.getCell(8, 5).value = data.semesterName || '';
 
     ws.getCell(9, 1).value = 'Enseignant :';
     ws.getCell(9, 2).value = data.teacherName || '.....................................';
@@ -1467,7 +1529,6 @@ ${body}
       'N°', 'Élèves',
       `Contrôle Continu ${Math.round(data.ccWeight * 100)}%`,
       `Examen Final ${Math.round(data.examWeight * 100)}%`,
-      'Rattrapage',
       'Moyenne',
     ];
     headerRow.font = { bold: true };
@@ -1482,12 +1543,13 @@ ${body}
       const row = ws.getRow(r);
       row.getCell(R.COL_NUM).value = idx + 1;
       row.getCell(R.COL_ELEVE).value = `${student.lastName} ${student.firstName}`;
-      // Moyenne is a live preview only (CC×weight + Examen×weight, replaced by Rattrapage
-      // when filled) — the app recomputes the authoritative average itself on import.
-      const ccCol = this.columnLetter(R.COL_CC), examCol = this.columnLetter(R.COL_EXAM), rattrCol = this.columnLetter(R.COL_RATTR);
-      const ccRef = `${ccCol}${r}`, examRef = `${examCol}${r}`, rattrRef = `${rattrCol}${r}`;
+      // Moyenne is a live preview only (CC×weight + Examen×weight) — the app recomputes
+      // the authoritative average itself on import, applying the rattrapage-replaces-
+      // everything rule when a retake grade has been recorded (see importGradesFromExcel).
+      const ccCol = this.columnLetter(R.COL_CC), examCol = this.columnLetter(R.COL_EXAM);
+      const ccRef = `${ccCol}${r}`, examRef = `${examCol}${r}`;
       row.getCell(R.COL_MOY).value = {
-        formula: `IF(${rattrRef}<>"",${rattrRef},IF(AND(${ccRef}<>"",${examRef}<>""),${ccRef}*${data.ccWeight}+${examRef}*${data.examWeight},IF(${ccRef}<>"",${ccRef},IF(${examRef}<>"",${examRef},""))))`,
+        formula: `IF(AND(${ccRef}<>"",${examRef}<>""),${ccRef}*${data.ccWeight}+${examRef}*${data.examWeight},IF(${ccRef}<>"",${ccRef},IF(${examRef}<>"",${examRef},"")))`,
       };
       r += 1;
     });
@@ -1651,113 +1713,341 @@ ${body}
     ws.views = [{ state: 'frozen', ySplit: 10 }];
   }
 
-  // Read-only consolidated recap (one row per student: per-UE averages, semester average,
-  // credits, rank, decision) — mirrors "TabNotS5" in the reference workbook. Computed live
-  // from the database, not read back on import (the Bulletin sheet below pulls from it
-  // via formulas for a single-student dynamic view).
+  // Column layout shared by TabNote and Bulletin: N°, Nom(s) et Prénom(s), then per UE —
+  // one column per subject, "Moyenne UEx", "Crédits Acquis", "Validation" — then the
+  // trailing result columns. Computed once so both sheets stay pixel-for-pixel aligned.
+  private buildTabNoteLayout(ueGroups: { ueName: string; ueCode?: string | null; subjects: { name: string; credits: number; coefficient: number }[] }[]) {
+    const NUM_COL = 1;
+    const NOM_COL = 2;
+    let cursor = 3;
+    const ues = ueGroups.map((ue) => {
+      const subjectCols = ue.subjects.map((s) => ({ ...s, col: cursor++ }));
+      const moyenneCol = cursor++;
+      const creditsCol = cursor++;
+      const validationCol = cursor++;
+      return { ...ue, subjectCols, moyenneCol, creditsCol, validationCol, startCol: subjectCols[0]?.col ?? moyenneCol, endCol: validationCol };
+    });
+    const totalCreditsCol = cursor++;
+    const moyenneSemCol = cursor++;
+    const rangCol = cursor++;
+    const avisCol = cursor++;
+    const mentionCol = cursor++;
+    const naissanceCol = cursor++;
+    const bacCol = cursor++;
+    const provenanceCol = cursor++;
+    const totalCols = cursor - 1;
+    return { NUM_COL, NOM_COL, ues, totalCreditsCol, moyenneSemCol, rangCol, avisCol, mentionCol, naissanceCol, bacCol, provenanceCol, totalCols };
+  }
+
+  // Read-only consolidated recap — one row per student, reproducing "TabNotS5" from the
+  // reference workbook: a 2-row UE banner spanning each UE's subject columns, a "Matières /
+  // Crédits / Coefficients" 3-row sub-header, per-student per-subject grades, per-UE moyenne/
+  // crédits acquis/validation, then TOTAL CREDITS, Moyenne Semestre, Rang, Avis du Jury,
+  // Mention, and the student's Date/lieu de naissance, Type de Bac, Provenance. Computed live
+  // from the database, not read back on import (Bulletin below pulls from it via formulas).
   private buildTabNoteSheet(
     workbook: ExcelJS.Workbook,
     data: {
       className?: string; year?: string; semesterName?: string;
-      ueNames: string[];
-      reports: { student: { studentId: string; lastName: string; firstName: string }; report: { ueName: string; average: number }[]; semesterAverage: number; totalCreditsWon: number; totalCreditsExpected: number; rank: number; creditValidationStatus: string }[];
+      ueGroups: { ueName: string; ueCode?: string | null; subjects: { name: string; credits: number; coefficient: number }[] }[];
+      reports: {
+        student: { studentId: string; lastName: string; firstName: string; birthDate?: Date | string | null; birthPlace?: string | null; bacType?: string | null; provenance?: string | null };
+        report: { ueName: string; average: number; creditsWon: number; status: string; subjects: { subject: string; average: number }[] }[];
+        semesterAverage: number; totalCreditsWon: number; totalCreditsExpected: number; rank: number; status: string;
+      }[];
       logoImageId?: number | null;
     },
   ) {
-    const fixedCols = 4; // N°, Matricule, Nom, Prénom
-    const cols = fixedCols + data.ueNames.length + 4; // + Moyenne, Crédits, Rang, Décision
+    const L = this.buildTabNoteLayout(data.ueGroups);
+    const semNum = (data.semesterName || '').replace(/^S/i, '');
     const ws = workbook.addWorksheet('TabNote', { properties: { tabColor: { argb: 'FF7F7F7F' } } });
-    ws.columns = [
-      { width: 6 }, { width: 18 }, { width: 20 }, { width: 20 },
-      ...data.ueNames.map(() => ({ width: 14 })),
-      { width: 14 }, { width: 14 }, { width: 8 }, { width: 22 },
-    ];
-    this.drawSheetHeader(ws, cols, `TABLEAU RÉCAPITULATIF DES NOTES — ${data.semesterName || ''}`, data.logoImageId);
+    ws.columns = Array.from({ length: L.totalCols }, (_, i) => (i < 2 ? { width: i === 0 ? 6 : 26 } : { width: 13 }));
+    this.drawSheetHeader(ws, L.totalCols, `TABLEAU RÉCAPITULATIF DES NOTES — SEMESTRE ${semNum}`, data.logoImageId);
 
     ws.getCell(6, 1).value = 'Classe :';
     ws.getCell(6, 2).value = data.className || '';
-    ws.getCell(6, 3).value = 'Année :';
-    ws.getCell(6, 4).value = data.year || '';
+    ws.getCell(6, 4).value = 'Année :';
+    ws.getCell(6, 5).value = data.year || '';
 
-    const headerRow = ws.getRow(ExportsService.TABNOTE_HEADER_ROW);
-    headerRow.values = [
-      'N°', 'Matricule', 'Nom', 'Prénom',
-      ...data.ueNames,
-      'Moyenne Semestre', 'Crédits Acquis', 'Rang', 'Décision',
-    ];
-    headerRow.font = { bold: true };
-    headerRow.alignment = { horizontal: 'center', wrapText: true };
-    headerRow.eachCell((cell) => {
+    const { UEBANNER_ROW, MATIERES_ROW, CREDITS_ROW, COEF_ROW, DATA_START } = {
+      UEBANNER_ROW: ExportsService.TABNOTE_UEBANNER_ROW,
+      MATIERES_ROW: ExportsService.TABNOTE_MATIERES_ROW,
+      CREDITS_ROW: ExportsService.TABNOTE_CREDITS_ROW,
+      COEF_ROW: ExportsService.TABNOTE_COEF_ROW,
+      DATA_START: ExportsService.TABNOTE_DATA_START,
+    };
+
+    const headerFill = (cell: ExcelJS.Cell) => {
       cell.fill = { type: 'pattern', pattern: 'solid', fgColor: { argb: 'FFE0E0E0' } };
       cell.border = { top: { style: 'thin' }, bottom: { style: 'thin' }, left: { style: 'thin' }, right: { style: 'thin' } };
-    });
+      cell.alignment = { horizontal: 'center', vertical: 'middle', wrapText: true };
+      cell.font = { bold: true };
+    };
+    const mergeVFull = (col: number, value: string) => {
+      ws.mergeCells(UEBANNER_ROW, col, COEF_ROW, col);
+      const cell = ws.getCell(UEBANNER_ROW, col);
+      cell.value = value;
+      headerFill(cell);
+    };
+    const mergeVFromMatieres = (col: number, value: string) => {
+      ws.mergeCells(MATIERES_ROW, col, COEF_ROW, col);
+      const cell = ws.getCell(MATIERES_ROW, col);
+      cell.value = value;
+      headerFill(cell);
+    };
+
+    // N° / Nom(s) et Prénom(s) — vertical banners spanning the whole header block.
+    mergeVFull(L.NUM_COL, 'N°');
+    mergeVFull(L.NOM_COL, "Nom(s) et Prénom(s)");
+
+    // Per-UE 2-row banner + subject/crédits/coefficients sub-header + "Validation" column.
+    // The banner only spans the subject columns + "Moyenne UEx" (mirrors the reference's
+    // G:P block) — "Crédits Acquis" and "Validation" get their own separate vertical merges
+    // below, so none of these ranges overlap.
+    for (const ue of L.ues) {
+      ws.mergeCells(UEBANNER_ROW, ue.startCol, UEBANNER_ROW + 1, ue.moyenneCol);
+      const banner = ws.getCell(UEBANNER_ROW, ue.startCol);
+      banner.value = ue.ueCode ? `${ue.ueCode} : ${ue.ueName}` : ue.ueName;
+      headerFill(banner);
+
+      for (const s of ue.subjectCols) {
+        const nameCell = ws.getCell(MATIERES_ROW, s.col);
+        nameCell.value = s.name;
+        headerFill(nameCell);
+        const creditsCell = ws.getCell(CREDITS_ROW, s.col);
+        creditsCell.value = s.credits;
+        headerFill(creditsCell);
+        const coefCell = ws.getCell(COEF_ROW, s.col);
+        coefCell.value = s.coefficient;
+        headerFill(coefCell);
+      }
+      const totalCredits = ue.subjects.reduce((sum, s) => sum + s.credits, 0);
+      const totalCoef = ue.subjects.reduce((sum, s) => sum + s.coefficient, 0);
+      const moyenneHeader = ws.getCell(MATIERES_ROW, ue.moyenneCol);
+      moyenneHeader.value = `Moyenne ${ue.ueCode || ue.ueName}`;
+      headerFill(moyenneHeader);
+      const moyenneCredits = ws.getCell(CREDITS_ROW, ue.moyenneCol);
+      moyenneCredits.value = totalCredits;
+      headerFill(moyenneCredits);
+      const moyenneCoef = ws.getCell(COEF_ROW, ue.moyenneCol);
+      moyenneCoef.value = totalCoef;
+      headerFill(moyenneCoef);
+
+      mergeVFromMatieres(ue.creditsCol, 'Crédits Acquis');
+      mergeVFull(ue.validationCol, 'Validation des crédits');
+    }
+
+    mergeVFull(L.totalCreditsCol, 'TOTAL CREDITS');
+    mergeVFull(L.moyenneSemCol, `Moyenne Semestre ${semNum}`);
+    mergeVFull(L.rangCol, 'Rang');
+    mergeVFull(L.avisCol, 'Avis du Jury');
+    mergeVFull(L.mentionCol, 'Mention');
+    mergeVFull(L.naissanceCol, 'Date et lieu de naissance');
+    mergeVFull(L.bacCol, 'Type de Bac');
+    mergeVFull(L.provenanceCol, 'Provenance');
 
     data.reports.forEach((r, idx) => {
-      const row = ws.getRow(ExportsService.TABNOTE_HEADER_ROW + 1 + idx);
-      const ueAvgByName = new Map(r.report.map((ue) => [ue.ueName, ue.average]));
-      row.values = [
-        idx + 1, r.student.studentId, r.student.lastName, r.student.firstName,
-        ...data.ueNames.map((name) => ueAvgByName.get(name) ?? ''),
-        r.semesterAverage, `${r.totalCreditsWon}/${r.totalCreditsExpected}`, r.rank, r.creditValidationStatus,
-      ];
+      const rowIdx = DATA_START + idx;
+      ws.getCell(rowIdx, L.NUM_COL).value = idx + 1;
+      ws.getCell(rowIdx, L.NOM_COL).value = `${r.student.lastName} ${r.student.firstName}`;
+
+      const ueByName = new Map(r.report.map((ue) => [ue.ueName, ue]));
+      for (const ue of L.ues) {
+        const ueReport = ueByName.get(ue.ueName);
+        const subjAvgByName = new Map((ueReport?.subjects || []).map((s) => [s.subject, s.average]));
+        for (const s of ue.subjectCols) {
+          ws.getCell(rowIdx, s.col).value = subjAvgByName.get(s.name) ?? '';
+        }
+        ws.getCell(rowIdx, ue.moyenneCol).value = ueReport?.average ?? '';
+        ws.getCell(rowIdx, ue.creditsCol).value = ueReport?.creditsWon ?? '';
+        ws.getCell(rowIdx, ue.validationCol).value = ueReport?.status ?? '';
+      }
+      ws.getCell(rowIdx, L.totalCreditsCol).value = r.totalCreditsWon;
+      ws.getCell(rowIdx, L.moyenneSemCol).value = r.semesterAverage;
+      ws.getCell(rowIdx, L.rangCol).value = r.rank;
+      ws.getCell(rowIdx, L.avisCol).value = r.status.replace(/^Semestre/, `Semestre ${semNum}`);
+      ws.getCell(rowIdx, L.mentionCol).value = this.mentionFor(r.semesterAverage);
+      ws.getCell(rowIdx, L.naissanceCol).value = this.formatBirthInfo(r.student);
+      ws.getCell(rowIdx, L.bacCol).value = r.student.bacType || '';
+      ws.getCell(rowIdx, L.provenanceCol).value = r.student.provenance || '';
     });
 
-    ws.getCell(4, 1).note = 'Lecture seule — générée automatiquement depuis les notes déjà saisies. Non lue à l\'import.';
-    ws.views = [{ state: 'frozen', ySplit: ExportsService.TABNOTE_HEADER_ROW }];
+    ws.getCell(1, 1).note = 'Lecture seule — générée automatiquement depuis les notes déjà saisies. Non lue à l\'import.';
+    ws.views = [{ state: 'frozen', xSplit: 2, ySplit: COEF_ROW }];
   }
 
-  // One-student "mini-bulletin" that updates live as you change the N° cell — pulls every
-  // value from TabNote via INDEX (row = header row + N°) instead of a fixed snapshot,
-  // mirroring how the reference workbook's own BULLETIN sheet looked up a student by number.
+  // Complete reproduction of "BULLETIN S5": institution header, title stating the exact
+  // semester, student identity/birth info, the full UE-grouped subject table (Crédits /
+  // Coefficients / Notes / Moyenne de classe), a "Pénalités d'absences" row, Moyenne
+  // Semestre, Rang/Mention, "Etat de la Validation des Crédits" table, Décision du Jury and
+  // signature block — one student at a time, selected by N° and pulled live from TabNote via
+  // INDEX() formulas so it always matches whatever is currently in the database.
   private buildBulletinSheet(
     workbook: ExcelJS.Workbook,
-    data: { className?: string; year?: string; semesterName?: string; ueNames: string[]; studentCount: number; logoImageId?: number | null },
+    data: {
+      className?: string; year?: string; semesterName?: string;
+      ueGroups: { ueName: string; ueCode?: string | null; subjects: { name: string; credits: number; coefficient: number }[] }[];
+      classAverages: Map<string, number>; // subjectName -> moyenne de classe
+      studentCount: number; logoImageId?: number | null;
+    },
   ) {
+    const L = this.buildTabNoteLayout(data.ueGroups);
+    const semNum = (data.semesterName || '').replace(/^S/i, '');
+    const cols = 8;
     const ws = workbook.addWorksheet('Bulletin', { properties: { tabColor: { argb: 'FFFFD966' } } });
-    ws.columns = [{ width: 24 }, { width: 30 }];
-    this.drawSheetHeader(ws, 2, 'BULLETIN DE NOTES (aperçu dynamique)', data.logoImageId);
+    ws.columns = [{ width: 4 }, { width: 30 }, { width: 10 }, { width: 12 }, { width: 6 }, { width: 6 }, { width: 12 }, { width: 14 }];
+    this.drawSheetHeader(ws, cols, `BULLETIN DE NOTES DU SEMESTRE ${semNum}`, data.logoImageId);
 
-    ws.getCell(6, 1).value = 'Classe :';
-    ws.getCell(6, 2).value = data.className || '';
-    ws.getCell(7, 1).value = 'Année / Semestre :';
-    ws.getCell(7, 2).value = `${data.year || ''} — ${data.semesterName || ''}`;
+    let r = 6;
+    ws.mergeCells(r, 1, r, cols); ws.getCell(r, 1).value = `Année universitaire : ${data.year || ''}`; ws.getCell(r, 1).font = { bold: true }; r += 1;
+    ws.mergeCells(r, 1, r, cols); ws.getCell(r, 1).value = `Classe : ${data.className || ''}`; ws.getCell(r, 1).font = { bold: true }; r += 2;
 
-    const selectorRow = 9;
+    const selectorRow = r;
     ws.getCell(selectorRow, 1).value = `N° de l'étudiant (1 à ${data.studentCount}) :`;
     ws.getCell(selectorRow, 1).font = { bold: true };
-    const selectorCell = ws.getCell(selectorRow, 2);
+    const selectorCell = ws.getCell(selectorRow, 3);
     selectorCell.value = 1;
     selectorCell.font = { bold: true, size: 14 };
     selectorCell.fill = { type: 'pattern', pattern: 'solid', fgColor: { argb: 'FFFFE699' } };
     selectorCell.alignment = { horizontal: 'center' };
     selectorCell.border = { top: { style: 'medium' }, bottom: { style: 'medium' }, left: { style: 'medium' }, right: { style: 'medium' } };
     selectorCell.note = `Changez ce nombre (1 à ${data.studentCount}) pour afficher le bulletin d'un autre étudiant — tout ci-dessous se met à jour automatiquement.`;
+    r += 2;
 
-    const T = ExportsService.TABNOTE_HEADER_ROW;
-    const rowRef = `${T}+$B$${selectorRow}`;
+    const T = ExportsService.TABNOTE_DATA_START;
+    const rowRef = `${T - 1}+$C$${selectorRow}`;
     const idx = (col: number) => `INDEX(TabNote!${this.columnLetter(col)}:${this.columnLetter(col)},${rowRef})`;
 
-    let r = selectorRow + 2;
     const field = (label: string, formula: string, bold = false) => {
-      ws.getCell(r, 1).value = label;
-      ws.getCell(r, 1).font = { bold: true };
-      const cell = ws.getCell(r, 2);
+      ws.mergeCells(r, 1, r, 3); ws.getCell(r, 1).value = label; ws.getCell(r, 1).font = { bold: true };
+      ws.mergeCells(r, 4, r, cols);
+      const cell = ws.getCell(r, 4);
       cell.value = { formula };
       if (bold) cell.font = { bold: true, size: 12 };
       r += 1;
     };
 
-    field('Matricule', idx(2));
-    field('Nom et Prénom', `${idx(3)}&" "&${idx(4)}`);
+    field('Nom(s) et Prénom(s)', idx(L.NOM_COL), true);
+    field('Date et lieu de naissance', idx(L.naissanceCol));
     r += 1;
-    data.ueNames.forEach((name, i) => field(`Moyenne ${name}`, idx(5 + i)));
-    r += 1;
-    field('Moyenne Semestre', idx(5 + data.ueNames.length), true);
-    field('Crédits Acquis', idx(6 + data.ueNames.length));
-    field('Rang', idx(7 + data.ueNames.length));
-    field('Décision', idx(8 + data.ueNames.length), true);
 
-    ws.views = [{ state: 'frozen', ySplit: selectorRow }];
+    // Main table: UE-grouped subject rows with Crédits / Coefficients / Notes / Moyenne de
+    // classe, a "Moyenne UEx" footer row per UE, then Pénalités d'absences + Moyenne Semestre.
+    const tableHeaderRow = r;
+    ws.mergeCells(r, 1, r, 2); ws.getCell(r, 1).value = 'Matières';
+    ws.getCell(r, 3).value = 'Crédits';
+    ws.getCell(r, 4).value = 'Coefficients';
+    ws.getCell(r, 5).value = "Notes de l'étudiant";
+    ws.mergeCells(r, 6, r, cols); ws.getCell(r, 6).value = 'Moyenne de classe';
+    ws.getRow(r).eachCell((cell) => {
+      cell.font = { bold: true };
+      cell.alignment = { horizontal: 'center', wrapText: true };
+      cell.fill = { type: 'pattern', pattern: 'solid', fgColor: { argb: 'FFE0E0E0' } };
+      cell.border = { top: { style: 'thin' }, bottom: { style: 'thin' }, left: { style: 'thin' }, right: { style: 'thin' } };
+    });
+    r += 1;
+
+    for (const ue of L.ues) {
+      ws.mergeCells(r, 1, r, cols);
+      const ueRow = ws.getCell(r, 1);
+      ueRow.value = ue.ueCode ? `${ue.ueCode} : ${ue.ueName}` : ue.ueName;
+      ueRow.font = { bold: true };
+      ueRow.fill = { type: 'pattern', pattern: 'solid', fgColor: { argb: 'FFD9D9D9' } };
+      r += 1;
+
+      for (const s of ue.subjectCols) {
+        ws.mergeCells(r, 1, r, 2); ws.getCell(r, 1).value = s.name;
+        ws.getCell(r, 3).value = s.credits;
+        ws.getCell(r, 4).value = s.coefficient;
+        ws.getCell(r, 5).value = { formula: idx(s.col) };
+        ws.mergeCells(r, 6, r, cols);
+        ws.getCell(r, 6).value = data.classAverages.get(s.name) ?? '';
+        r += 1;
+      }
+
+      const totalCredits = ue.subjects.reduce((sum, s) => sum + s.credits, 0);
+      ws.mergeCells(r, 1, r, 2); ws.getCell(r, 1).value = `Moyenne ${ue.ueCode || ue.ueName}`; ws.getCell(r, 1).font = { bold: true };
+      ws.getCell(r, 3).value = totalCredits;
+      ws.getCell(r, 4).value = totalCredits;
+      ws.getCell(r, 5).value = { formula: idx(ue.moyenneCol) };
+      ws.getCell(r, 5).font = { bold: true };
+      ws.mergeCells(r, 6, r, cols);
+      r += 1;
+    }
+
+    ws.mergeCells(r, 1, r, 2); ws.getCell(r, 1).value = "Pénalités d'absences";
+    ws.mergeCells(r, 5, r, cols); ws.getCell(r, 5).value = 'Voir Absences';
+    r += 2;
+
+    ws.mergeCells(r, 1, r, 3); ws.getCell(r, 1).value = `Moyenne Semestre ${semNum}`; ws.getCell(r, 1).font = { bold: true, size: 12 };
+    ws.mergeCells(r, 4, r, cols);
+    const semAvgCell = ws.getCell(r, 4);
+    semAvgCell.value = { formula: idx(L.moyenneSemCol) };
+    semAvgCell.font = { bold: true, size: 12 };
+    r += 2;
+
+    // Rang / Mention
+    ws.getCell(r, 1).value = "Rang de l'étudiant au Semestre"; ws.getCell(r, 1).font = { bold: true };
+    ws.mergeCells(r, 3, r, 4);
+    ws.getCell(r, 3).value = { formula: `${idx(L.rangCol)}&"/${data.studentCount}"` };
+    ws.getCell(r, 6).value = 'Mention'; ws.getCell(r, 6).font = { bold: true };
+    ws.mergeCells(r, 7, r, cols);
+    ws.getCell(r, 7).value = { formula: idx(L.mentionCol) };
+    r += 2;
+
+    // Etat de la Validation des Crédits au Semestre N
+    ws.mergeCells(r, 1, r, cols);
+    ws.getCell(r, 1).value = `Etat de la Validation des Crédits au Semestre ${semNum}`;
+    ws.getCell(r, 1).font = { bold: true };
+    ws.getCell(r, 1).alignment = { horizontal: 'center' };
+    r += 1;
+    const validationHeaderRow = r;
+    let vc = 1;
+    for (const ue of L.ues) {
+      ws.getCell(r, vc).value = ue.ueCode || ue.ueName;
+      ws.getCell(r, vc).font = { bold: true };
+      vc += 1;
+    }
+    const totalCreditsHeaderCol = Math.min(vc, cols);
+    ws.getCell(r, totalCreditsHeaderCol).value = `Crédits validés au Semestre ${semNum}`;
+    ws.getCell(r, totalCreditsHeaderCol).font = { bold: true };
+    r += 1;
+    vc = 1;
+    for (const ue of L.ues) {
+      const totalCredits = ue.subjects.reduce((sum, s) => sum + s.credits, 0);
+      ws.getCell(r, vc).value = { formula: `${idx(ue.creditsCol)}&"/${totalCredits}"` };
+      vc += 1;
+    }
+    ws.getCell(r, totalCreditsHeaderCol).value = { formula: `${idx(L.totalCreditsCol)}&"/${data.ueGroups.reduce((sum, ue) => sum + ue.subjects.reduce((s2, s) => s2 + s.credits, 0), 0)}"` };
+    r += 1;
+    vc = 1;
+    for (const ue of L.ues) {
+      ws.getCell(r, vc).value = { formula: idx(ue.validationCol) };
+      vc += 1;
+    }
+    r += 2;
+
+    ws.getCell(r, 1).value = 'Décision du Jury :'; ws.getCell(r, 1).font = { bold: true };
+    ws.mergeCells(r, 3, r, cols);
+    const decisionCell = ws.getCell(r, 3);
+    decisionCell.value = { formula: idx(L.avisCol) };
+    decisionCell.font = { bold: true, size: 12 };
+    r += 3;
+
+    ws.mergeCells(r, 1, r, cols);
+    ws.getCell(r, 1).value = 'Fait à Libreville, le ...................';
+    r += 2;
+    ws.mergeCells(r, 1, r, cols);
+    ws.getCell(r, 1).value = 'Le Directeur des Etudes et de la Pédagogie';
+    ws.getCell(r, 1).alignment = { horizontal: 'center' };
+    ws.getCell(r, 1).font = { bold: true };
+    r += 3;
+    ws.mergeCells(r, 1, r, cols);
+    ws.getCell(r, 1).value = 'Davy Edgard MOUSSAVOU';
+    ws.getCell(r, 1).alignment = { horizontal: 'center' };
+    ws.getCell(r, 1).font = { bold: true };
+
+    ws.views = [{ state: 'frozen', ySplit: tableHeaderRow }];
   }
 
   // Real data export (as opposed to generateTemplate, which is always a blank canvas) —
