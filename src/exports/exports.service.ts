@@ -982,6 +982,16 @@ ${body}
       .toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-+|-+$/g, '') || 'etudiant';
   }
 
+  // The relevé identifies students by name only (no Matricule column, matching the
+  // reference workbook) — a brand-new student still needs a unique studentId to satisfy
+  // the schema, so one is generated here. Clearly non-guessable-as-real so nobody mistakes
+  // it for an official INPTIC matricule; the admin assigns the real one in Gestion Étudiants.
+  private generateAutoMatricule(): string {
+    const stamp = Date.now().toString(36).toUpperCase();
+    const rand = Math.random().toString(36).slice(2, 6).toUpperCase();
+    return `AUTO-${stamp}-${rand}`;
+  }
+
   async importGradesFromExcel(buffer: Buffer, semesterId: string, userId: string) {
     const workbook = new ExcelJS.Workbook();
     await workbook.xlsx.load(buffer as any);
@@ -990,9 +1000,16 @@ ${body}
 
     // Loaded once up front (instead of per-row queries) so matching is both faster and
     // resilient to whitespace/case differences between the Excel file and the database.
+    // The relevé has no Matricule column (the reference workbook never had one either), so
+    // students are matched by their full name; ambiguous (duplicate) names are reported as
+    // an error rather than guessed at.
     const students = await this.prisma.student.findMany();
     const studentById = new Map(students.map((s) => [s.id, s]));
-    const studentByMatricule = new Map(students.map((s) => [this.normalizeText(s.studentId), s]));
+    const studentByName = new Map<string, typeof students[number] | 'AMBIGUOUS'>();
+    for (const s of students) {
+      const key = this.normalizeText(`${s.lastName} ${s.firstName}`);
+      studentByName.set(key, studentByName.has(key) ? 'AMBIGUOUS' : s);
+    }
 
     const subjects = await this.prisma.subject.findMany({ where: { ue: { semesterId } } });
     const subjectById = new Map(subjects.map((s) => [s.id, s]));
@@ -1023,7 +1040,7 @@ ${body}
     // sanitized/truncated for Excel and isn't reliable for matching).
     for (const worksheet of workbook.worksheets) {
       if (worksheet.name === 'Absences') {
-        const abs = await this.importAbsencesSheet(worksheet, semesterId, userId, studentById, studentByMatricule);
+        const abs = await this.importAbsencesSheet(worksheet, semesterId, userId, studentByName);
         count += abs.count;
         skipped += abs.skipped;
         errors.push(...abs.errors);
@@ -1032,8 +1049,8 @@ ${body}
       if (worksheet.name === 'FV' || worksheet.name === 'TabNote' || worksheet.name === 'Bulletin') continue; // roster/read-only/preview sheets
 
       const subjectRef = worksheet.getCell(R.MATIERE_ROW, R.MATIERE_COL).toString().trim();
-      const headerLabel = worksheet.getCell(R.HEADER_ROW, R.COL_MATRICULE).toString().trim();
-      if (!subjectRef || !headerLabel.toLowerCase().startsWith('matricule')) continue; // not a relevé sheet
+      const headerLabel = this.normalizeText(worksheet.getCell(R.HEADER_ROW, R.COL_ELEVE).toString());
+      if (!subjectRef || !headerLabel.startsWith('élève')) continue; // not a relevé sheet
       anyReleveSheetFound = true;
 
       let subject = subjectById.get(subjectRef) ?? subjectByName.get(this.normalizeText(subjectRef));
@@ -1069,29 +1086,37 @@ ${body}
 
       for (let i = R.HEADER_ROW + 1; i <= worksheet.rowCount; i++) {
         const row = worksheet.getRow(i);
-        const studentRef = row.getCell(R.COL_MATRICULE).toString().trim();
-        if (!studentRef) break; // end of the student list for this sheet
+        const eleveName = row.getCell(R.COL_ELEVE).toString().trim();
+        if (!eleveName) break; // end of the student list for this sheet
 
-        let student = studentById.get(studentRef) ?? studentByMatricule.get(this.normalizeText(studentRef));
+        const nameKey = this.normalizeText(eleveName);
+        const match = studentByName.get(nameKey);
+        if (match === 'AMBIGUOUS') {
+          skipped++;
+          errors.push(`${worksheet.name} - Ligne ${i}: plusieurs étudiants portent le nom "${eleveName}" — renseignez-le distinctement dans Gestion Étudiants avant import.`);
+          continue;
+        }
+
+        let student = match;
         if (!student) {
           try {
-            const eleveName = row.getCell(R.COL_ELEVE).toString().trim();
             const { lastName, firstName } = this.splitEleveName(eleveName);
+            const studentId = this.generateAutoMatricule();
             const created = await this.usersService.createStudent({
-              studentId: studentRef,
+              studentId,
               lastName,
               firstName,
-              email: `${this.slugifyForEmail(studentRef)}@a-completer.inptic.ga`,
+              email: `${this.slugifyForEmail(studentId)}@a-completer.inptic.ga`,
               class: sheetClass || '(à compléter)',
               password: 'Inptic2024!',
             });
             student = created.student!; // just created together with the user above, always present
             studentById.set(student.id, student);
-            studentByMatricule.set(this.normalizeText(student.studentId), student);
-            createdStudents.push(`${studentRef} (${lastName} ${firstName})`);
+            studentByName.set(nameKey, student);
+            createdStudents.push(`${eleveName} (matricule auto: ${studentId})`);
           } catch (e) {
             skipped++;
-            errors.push(`${worksheet.name} - Ligne ${i}: échec de création de l'étudiant ("${studentRef}") — ${e instanceof Error ? e.message : 'erreur inconnue'}`);
+            errors.push(`${worksheet.name} - Ligne ${i}: échec de création de l'étudiant ("${eleveName}") — ${e instanceof Error ? e.message : 'erreur inconnue'}`);
             continue;
           }
           if (!student) continue; // unreachable in practice, satisfies control-flow narrowing below
@@ -1149,22 +1174,21 @@ ${body}
     worksheet: ExcelJS.Worksheet,
     semesterId: string,
     userId: string,
-    studentById: Map<string, { id: string; studentId: string }>,
-    studentByMatricule: Map<string, { id: string; studentId: string }>,
+    studentByName: Map<string, { id: string; studentId: string } | 'AMBIGUOUS'>,
   ) {
     let count = 0;
     let skipped = 0;
     const errors: string[] = [];
 
-    const headerRow = worksheet.getRow(9);
-    if (headerRow.getCell(2).toString().trim().toLowerCase() !== 'matricule') {
+    const headerRow = worksheet.getRow(10);
+    if (!this.normalizeText(headerRow.getCell(2).toString()).startsWith('élève')) {
       return { count, skipped, errors }; // not a recognized Absences layout
     }
 
     const subjects = await this.prisma.subject.findMany({ where: { ue: { semesterId } } });
     const subjectByName = new Map(subjects.map((s) => [this.normalizeText(s.name), s]));
     const subjectColumns: { col: number; subjectId: string }[] = [];
-    for (let c = 4; c <= worksheet.columnCount; c++) {
+    for (let c = 3; c <= worksheet.columnCount; c++) {
       const header = headerRow.getCell(c).toString().trim();
       if (!header) continue;
       const subject = subjectByName.get(this.normalizeText(header));
@@ -1175,15 +1199,21 @@ ${body}
     const attendanceKey = (studentId: string, subjectId: string) => `${studentId}::${subjectId}`;
     const attendanceByKey = new Map(existingAttendances.map((a) => [attendanceKey(a.studentId, a.subjectId), a]));
 
-    for (let i = 10; i <= worksheet.rowCount; i++) {
+    for (let i = 11; i <= worksheet.rowCount; i++) {
       const row = worksheet.getRow(i);
-      const studentRef = row.getCell(2).toString().trim();
-      if (!studentRef) break;
+      const eleveName = row.getCell(2).toString().trim();
+      if (!eleveName) break;
 
-      const student = studentById.get(studentRef) ?? studentByMatricule.get(this.normalizeText(studentRef));
+      const match = studentByName.get(this.normalizeText(eleveName));
+      if (match === 'AMBIGUOUS') {
+        skipped++;
+        errors.push(`Absences - Ligne ${i}: plusieurs étudiants portent le nom "${eleveName}" — impossible de choisir.`);
+        continue;
+      }
+      const student = match;
       if (!student) {
         skipped++;
-        errors.push(`Absences - Ligne ${i}: étudiant introuvable ("${studentRef}")`);
+        errors.push(`Absences - Ligne ${i}: étudiant introuvable ("${eleveName}") — importez-le d'abord via un relevé de notes ou Gestion Étudiants.`);
         continue;
       }
 
@@ -1375,10 +1405,14 @@ ${body}
 
   // Row/column layout the "relevé de notes" sheets below use — importGradesFromExcel reads
   // these exact positions back, since this service both generates and parses the file.
+  // No Matricule column — the reference workbook (ASUR 2014-2015.xls) never had one, it
+  // identified students by name only. Matricule stays the authoritative ID in Gestion
+  // Étudiants; a new student created from a relevé import gets one auto-generated (see
+  // importGradesFromExcel) but it isn't shown here.
   private static readonly RELEVE = {
     MATIERE_ROW: 7, MATIERE_COL: 2,
     HEADER_ROW: 11,
-    COL_NUM: 1, COL_MATRICULE: 2, COL_ELEVE: 3, COL_CC: 4, COL_EXAM: 5, COL_RATTR: 6, COL_MOY: 7,
+    COL_NUM: 1, COL_ELEVE: 2, COL_CC: 3, COL_EXAM: 4, COL_RATTR: 5, COL_MOY: 6,
   } as const;
 
   // Header row of the TabNote sheet — the Bulletin sheet's INDEX() formulas are built
@@ -1405,30 +1439,11 @@ ${body}
     const R = ExportsService.RELEVE;
     const sheetName = this.uniqueSheetName(data.subjectName, usedSheetNames);
     const ws = workbook.addWorksheet(sheetName, data.tabColor ? { properties: { tabColor: { argb: data.tabColor } } } : undefined);
+    const cols = 6;
     ws.columns = [
-      { width: 6 }, { width: 18 }, { width: 34 }, { width: 14 }, { width: 14 }, { width: 14 }, { width: 12 },
+      { width: 6 }, { width: 40 }, { width: 16 }, { width: 16 }, { width: 14 }, { width: 12 },
     ];
-    ws.getRow(1).height = 20;
-    ws.getRow(2).height = 20;
-    ws.getRow(3).height = 20;
-    if (data.logoImageId != null) {
-      ws.addImage(data.logoImageId, { tl: { col: 0.2, row: 0.1 }, ext: { width: 44, height: 36 } });
-    }
-
-    const centerBold = (cell: ExcelJS.Cell, size = 9) => { cell.font = { bold: true, size }; cell.alignment = { horizontal: 'center' }; };
-
-    ws.mergeCells(1, 1, 1, 7);
-    centerBold(ws.getCell(1, 1), 9);
-    ws.getCell(1, 1).value = 'INSTITUT NATIONAL DE LA POSTE, DES TECHNOLOGIES DE L\'INFORMATION ET DE LA COMMUNICATION';
-    ws.mergeCells(2, 1, 2, 7);
-    centerBold(ws.getCell(2, 1), 9);
-    ws.getCell(2, 1).value = 'DIRECTION DES ETUDES ET DE LA PEDAGOGIE';
-
-    ws.mergeCells(4, 1, 4, 7);
-    const title = ws.getCell(4, 1);
-    title.value = 'RELEVE DE NOTES';
-    title.font = { bold: true, size: 13 };
-    title.alignment = { horizontal: 'center' };
+    this.drawSheetHeader(ws, cols, 'RELEVE DE NOTES', data.logoImageId);
 
     ws.getCell(6, 1).value = 'Classe :';
     ws.getCell(6, 2).value = data.className || '';
@@ -1449,7 +1464,7 @@ ${body}
 
     const headerRow = ws.getRow(R.HEADER_ROW);
     headerRow.values = [
-      'N°', 'Matricule', 'Élèves',
+      'N°', 'Élèves',
       `Contrôle Continu ${Math.round(data.ccWeight * 100)}%`,
       `Examen Final ${Math.round(data.examWeight * 100)}%`,
       'Rattrapage',
@@ -1466,11 +1481,11 @@ ${body}
     data.students.forEach((student, idx) => {
       const row = ws.getRow(r);
       row.getCell(R.COL_NUM).value = idx + 1;
-      row.getCell(R.COL_MATRICULE).value = student.studentId;
       row.getCell(R.COL_ELEVE).value = `${student.lastName} ${student.firstName}`;
       // Moyenne is a live preview only (CC×weight + Examen×weight, replaced by Rattrapage
       // when filled) — the app recomputes the authoritative average itself on import.
-      const ccRef = `D${r}`, examRef = `E${r}`, rattrRef = `F${r}`;
+      const ccCol = this.columnLetter(R.COL_CC), examCol = this.columnLetter(R.COL_EXAM), rattrCol = this.columnLetter(R.COL_RATTR);
+      const ccRef = `${ccCol}${r}`, examRef = `${examCol}${r}`, rattrRef = `${rattrCol}${r}`;
       row.getCell(R.COL_MOY).value = {
         formula: `IF(${rattrRef}<>"",${rattrRef},IF(AND(${ccRef}<>"",${examRef}<>""),${ccRef}*${data.ccWeight}+${examRef}*${data.examWeight},IF(${ccRef}<>"",${ccRef},IF(${examRef}<>"",${examRef},""))))`,
       };
@@ -1482,21 +1497,23 @@ ${body}
     ws.getCell(r, 1).value = 'Moyenne de la classe :';
     ws.getCell(r, 1).font = { italic: true };
     if (lastDataRow >= R.HEADER_ROW + 1) {
-      ws.getCell(r, R.COL_MOY).value = { formula: `IFERROR(AVERAGE(G${R.HEADER_ROW + 1}:G${lastDataRow}),"")` };
+      const moyCol = this.columnLetter(R.COL_MOY);
+      ws.getCell(r, R.COL_MOY).value = { formula: `IFERROR(AVERAGE(${moyCol}${R.HEADER_ROW + 1}:${moyCol}${lastDataRow}),"")` };
     }
 
     r += 2;
     ws.getCell(r, 1).value = 'Date : .....................';
     r += 2;
     ws.getCell(r, 1).value = "Signature de l'Enseignant";
-    ws.getCell(r, 5).value = 'Visa Responsable Pédagogique';
+    ws.getCell(r, 4).value = 'Visa Responsable Pédagogique';
     ws.getCell(r, 1).font = { italic: true, size: 8 };
-    ws.getCell(r, 5).font = { italic: true, size: 8 };
+    ws.getCell(r, 4).font = { italic: true, size: 8 };
 
     ws.getCell(R.MATIERE_ROW, 1).note =
       'Cette cellule identifie la matière pour l\'import — ne la modifiez pas. ' +
       'Seules les colonnes Contrôle Continu, Examen Final et Rattrapage sont à remplir ; ' +
-      'la Moyenne est calculée automatiquement à titre indicatif.';
+      'la Moyenne est calculée automatiquement à titre indicatif. Les étudiants sont ' +
+      'reconnus par leur nom — le matricule se gère dans Gestion Étudiants.';
     ws.views = [{ state: 'frozen', ySplit: R.HEADER_ROW }];
   }
 
@@ -1514,36 +1531,18 @@ ${body}
     },
   ) {
     const ws = workbook.addWorksheet('FV', { properties: { tabColor: { argb: 'FF8497B0' } } });
-    ws.columns = [{ width: 6 }, { width: 20 }, { width: 26 }, { width: 26 }];
-    ws.getRow(1).height = 20;
-    ws.getRow(2).height = 20;
-    if (data.logoImageId != null) {
-      ws.addImage(data.logoImageId, { tl: { col: 0.2, row: 0.1 }, ext: { width: 44, height: 36 } });
-    }
-
-    const centerBold = (cell: ExcelJS.Cell, size = 9) => { cell.font = { bold: true, size }; cell.alignment = { horizontal: 'center' }; };
-    ws.mergeCells(1, 1, 1, 4);
-    centerBold(ws.getCell(1, 1));
-    ws.getCell(1, 1).value = 'INSTITUT NATIONAL DE LA POSTE, DES TECHNOLOGIES DE L\'INFORMATION ET DE LA COMMUNICATION';
-    ws.mergeCells(2, 1, 2, 4);
-    centerBold(ws.getCell(2, 1));
-    ws.getCell(2, 1).value = 'DIRECTION DES ETUDES ET DE LA PEDAGOGIE';
-
-    ws.mergeCells(4, 1, 4, 4);
-    const title = ws.getCell(4, 1);
-    title.value = 'FICHE DE VIE — LISTE DES ÉTUDIANTS';
-    title.font = { bold: true, size: 13 };
-    title.alignment = { horizontal: 'center' };
+    ws.columns = [{ width: 6 }, { width: 40 }];
+    this.drawSheetHeader(ws, 2, 'RELEVE DE NOTES', data.logoImageId);
 
     ws.getCell(6, 1).value = 'Classe :';
     ws.getCell(6, 2).value = data.className || '';
-    ws.getCell(6, 3).value = 'Année :';
-    ws.getCell(6, 4).value = data.year || '';
-    ws.getCell(7, 1).value = 'Semestre :';
-    ws.getCell(7, 2).value = data.semesterName || '';
+    ws.getCell(7, 1).value = 'Année :';
+    ws.getCell(7, 2).value = data.year || '';
+    ws.getCell(8, 1).value = 'Semestre :';
+    ws.getCell(8, 2).value = data.semesterName || '';
 
-    const headerRow = ws.getRow(9);
-    headerRow.values = ['N°', 'Matricule', 'Nom', 'Prénom'];
+    const headerRow = ws.getRow(11);
+    headerRow.values = ['N°', 'Élèves'];
     headerRow.font = { bold: true };
     headerRow.alignment = { horizontal: 'center' };
     headerRow.eachCell((cell) => {
@@ -1552,11 +1551,11 @@ ${body}
     });
 
     data.students.forEach((student, idx) => {
-      const row = ws.getRow(10 + idx);
-      row.values = [idx + 1, student.studentId, student.lastName, student.firstName];
+      const row = ws.getRow(12 + idx);
+      row.values = [idx + 1, `${student.lastName} ${student.firstName}`];
     });
 
-    ws.views = [{ state: 'frozen', ySplit: 9 }];
+    ws.views = [{ state: 'frozen', ySplit: 11 }];
   }
 
   private uniqueSheetName(subjectName: string, used: Set<string>): string {
@@ -1574,23 +1573,25 @@ ${body}
   }
 
   private drawSheetHeader(ws: ExcelJS.Worksheet, cols: number, title: string, logoImageId?: number | null) {
-    ws.getRow(1).height = 20;
-    ws.getRow(2).height = 20;
+    ws.getRow(1).height = 30;
+    ws.getRow(2).height = 26;
+    ws.getRow(3).height = 10;
     if (logoImageId != null) {
-      ws.addImage(logoImageId, { tl: { col: 0.2, row: 0.1 }, ext: { width: 44, height: 36 } });
+      ws.addImage(logoImageId, { tl: { col: 0.15, row: 0.05 }, ext: { width: 74, height: 60 } });
     }
-    const centerBold = (cell: ExcelJS.Cell, size = 9) => { cell.font = { bold: true, size }; cell.alignment = { horizontal: 'center' }; };
+    const centerBold = (cell: ExcelJS.Cell, size = 11) => { cell.font = { bold: true, size }; cell.alignment = { horizontal: 'center' }; };
     ws.mergeCells(1, 1, 1, cols);
-    centerBold(ws.getCell(1, 1));
+    centerBold(ws.getCell(1, 1), 12);
     ws.getCell(1, 1).value = 'INSTITUT NATIONAL DE LA POSTE, DES TECHNOLOGIES DE L\'INFORMATION ET DE LA COMMUNICATION';
     ws.mergeCells(2, 1, 2, cols);
-    centerBold(ws.getCell(2, 1));
+    centerBold(ws.getCell(2, 1), 11);
     ws.getCell(2, 1).value = 'DIRECTION DES ETUDES ET DE LA PEDAGOGIE';
     ws.mergeCells(4, 1, 4, cols);
     const titleCell = ws.getCell(4, 1);
     titleCell.value = title;
-    titleCell.font = { bold: true, size: 13 };
+    titleCell.font = { bold: true, size: 18 };
     titleCell.alignment = { horizontal: 'center' };
+    ws.getRow(4).height = 26;
   }
 
   // Converts a 1-based column index to its Excel letter (1 -> A, 27 -> AA, ...).
@@ -1616,20 +1617,20 @@ ${body}
       logoImageId?: number | null;
     },
   ) {
-    const cols = 3 + data.subjects.length;
+    const cols = 2 + data.subjects.length;
     const ws = workbook.addWorksheet('Absences', { properties: { tabColor: { argb: 'FFED7D31' } } });
-    ws.columns = [{ width: 6 }, { width: 18 }, { width: 30 }, ...data.subjects.map(() => ({ width: 16 }))];
+    ws.columns = [{ width: 6 }, { width: 40 }, ...data.subjects.map(() => ({ width: 16 }))];
     this.drawSheetHeader(ws, cols, 'SUIVI DES ABSENCES (heures)', data.logoImageId);
 
     ws.getCell(6, 1).value = 'Classe :';
     ws.getCell(6, 2).value = data.className || '';
-    ws.getCell(6, 3).value = 'Année :';
-    ws.getCell(6, 4).value = data.year || '';
-    ws.getCell(7, 1).value = 'Semestre :';
-    ws.getCell(7, 2).value = data.semesterName || '';
+    ws.getCell(7, 1).value = 'Année :';
+    ws.getCell(7, 2).value = data.year || '';
+    ws.getCell(8, 1).value = 'Semestre :';
+    ws.getCell(8, 2).value = data.semesterName || '';
 
-    const headerRow = ws.getRow(9);
-    headerRow.values = ['N°', 'Matricule', 'Élèves', ...data.subjects.map((s) => s.name)];
+    const headerRow = ws.getRow(10);
+    headerRow.values = ['N°', 'Élèves', ...data.subjects.map((s) => s.name)];
     headerRow.font = { bold: true };
     headerRow.alignment = { horizontal: 'center', wrapText: true };
     headerRow.eachCell((cell) => {
@@ -1638,16 +1639,16 @@ ${body}
     });
 
     data.students.forEach((student, idx) => {
-      const row = ws.getRow(10 + idx);
+      const row = ws.getRow(11 + idx);
       row.getCell(1).value = idx + 1;
-      row.getCell(2).value = student.studentId;
-      row.getCell(3).value = `${student.lastName} ${student.firstName}`;
+      row.getCell(2).value = `${student.lastName} ${student.firstName}`;
     });
 
-    ws.getCell(9, 2).note =
+    ws.getCell(10, 2).note =
       'Une colonne par matière : indiquez le nombre d\'heures d\'absence, laissez vide sinon. ' +
-      'Ne modifiez pas les en-têtes de colonnes : ils servent à retrouver la matière lors de l\'import.';
-    ws.views = [{ state: 'frozen', ySplit: 9 }];
+      'Ne modifiez pas les en-têtes de colonnes : ils servent à retrouver la matière lors de l\'import. ' +
+      'Les étudiants sont reconnus par leur nom.';
+    ws.views = [{ state: 'frozen', ySplit: 10 }];
   }
 
   // Read-only consolidated recap (one row per student: per-UE averages, semester average,
