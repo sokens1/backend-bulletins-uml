@@ -1119,18 +1119,100 @@ ${body}
   // locateReleveLayout alone to tell it apart from a real relevé.
   private static readonly NON_RELEVE_SHEET = /^(fv|absences|tabnote|bulletin|tabnots|tabannuel|bullannuel|feuil)/i;
 
-  private detectFileSemester(workbook: ExcelJS.Workbook): { year: string; semesterName: string } | null {
+  // Reads the Année/Semestre a single relevé sheet declares (not the whole file — a workbook
+  // like the reference one mixes S5 and S6 relevé sheets together, each with its OWN
+  // Semestre value, so detection has to happen per sheet rather than once globally).
+  private readSheetAnneeSemestre(ws: ExcelJS.Worksheet, layout: ReturnType<ExportsService['locateReleveLayout']>): { year: string; semesterName: string } | null {
+    if (!layout) return null;
+    const anneeRaw = this.cellString(ws.getCell(layout.classeRow, layout.anneeCol)).trim();
+    const semestreRaw = this.cellString(ws.getCell(layout.coeffRow, layout.semestreCol)).trim();
+    const year = anneeRaw ? this.normalizeYear(anneeRaw) : null;
+    const semesterName = semestreRaw ? this.normalizeSemesterName(semestreRaw) : null;
+    return year && semesterName ? { year, semesterName } : null;
+  }
+
+  // Parses every "TabNotS5"/"TabNotS6"-style recap sheet in the workbook for the REAL per-UE
+  // grouping, credits and coefficients — the relevé sheets themselves only carry each
+  // subject's OWN coefficient, never its credits or which UE it belongs to. Layout is located
+  // by content, not fixed positions, since TabNotS5 and TabNotS6 don't even share the same
+  // row numbers for "Matières"/"Crédits"/"Coefficients" in the reference workbook.
+  //
+  // A column is a real subject (or a UE's "Moyenne UEx" summary) column if and only if its
+  // Crédits-row cell holds a plain number — the "Crédits Acquis"/"Validation" columns that
+  // interleave with them have text in the Matières row but are blank in the Crédits row,
+  // which is what tells them apart. Hitting a "Moyenne …" cell with nothing accumulated yet
+  // means every real UE has already closed out and this is the semester-level "Moyenne S5"
+  // summary — scanning stops there.
+  private parseTabNotUeInfo(workbook: ExcelJS.Workbook): {
+    subjectInfo: Map<string, { ueCode: string; ueName: string; credits: number; coefficient: number }>;
+    ueInfo: Map<string, { ueName: string; credits: number }>;
+  } {
+    const subjectInfo = new Map<string, { ueCode: string; ueName: string; credits: number; coefficient: number }>();
+    const ueInfo = new Map<string, { ueName: string; credits: number }>();
+    const MAX_ROWS = 20, MAX_COLS = 60;
+
     for (const ws of workbook.worksheets) {
-      if (ExportsService.NON_RELEVE_SHEET.test(ws.name)) continue;
-      const layout = this.locateReleveLayout(ws);
-      if (!layout) continue;
-      const anneeRaw = this.cellString(ws.getCell(layout.classeRow, layout.anneeCol)).trim();
-      const semestreRaw = this.cellString(ws.getCell(layout.coeffRow, layout.semestreCol)).trim();
-      const year = anneeRaw ? this.normalizeYear(anneeRaw) : null;
-      const semesterName = semestreRaw ? this.normalizeSemesterName(semestreRaw) : null;
-      if (year && semesterName) return { year, semesterName };
+      if (!/^tabnot/i.test(ws.name)) continue;
+
+      let matieresRow = -1;
+      for (let r = 1; r <= MAX_ROWS && matieresRow === -1; r++) {
+        for (let c = 1; c <= MAX_COLS; c++) {
+          if (this.normalizeText(this.cellString(ws.getCell(r, c))).startsWith('matière')) { matieresRow = r; break; }
+        }
+      }
+      if (matieresRow === -1) continue;
+      const creditsRow = matieresRow + 1;
+      const coefRow = matieresRow + 2;
+
+      // Any non-blank text 1-2 rows above Matières is a UE banner ("UE5-1 : ENSEIGNEMENT
+      // GENERAL") — used only for the nicer full name; the code itself comes from the
+      // "Moyenne UEx" marker, which is always present and reliably parseable.
+      const bannerCells: { col: number; text: string }[] = [];
+      for (const br of [matieresRow - 2, matieresRow - 1]) {
+        if (br < 1) continue;
+        for (let c = 1; c <= MAX_COLS; c++) {
+          const text = this.cellString(ws.getCell(br, c)).trim();
+          if (text) bannerCells.push({ col: c, text });
+        }
+      }
+      const bannerNameFor = (startCol: number, endCol: number): string | undefined => {
+        const hit = bannerCells.find((b) => b.col >= startCol && b.col <= endCol);
+        if (!hit) return undefined;
+        const idx = hit.text.indexOf(':');
+        return idx === -1 ? hit.text : hit.text.slice(idx + 1).trim();
+      };
+
+      let pending: { name: string; credits: number; coefficient: number }[] = [];
+      let blockStartCol = -1;
+      for (let c = 1; c <= MAX_COLS; c++) {
+        const text = this.cellString(ws.getCell(matieresRow, c)).trim();
+        // A UE's own "Moyenne UEx" total is usually a live SUM() formula, not a plain
+        // number — cellString resolves a formula cell's cached result (see its own doc
+        // comment), so this must go through it too, not a raw typeof/`.value` check.
+        const creditText = this.cellString(ws.getCell(creditsRow, c));
+        const creditNum = Number(creditText);
+        if (creditText === '' || !Number.isFinite(creditNum)) continue; // metadata column (Crédits Acquis, Validation, …) or empty
+
+        if (this.normalizeText(text).startsWith('moyenne')) {
+          if (pending.length === 0) break; // no UE block open — this is the semester-level total, we're done
+          const m = text.match(/moyenne\s+(.+)$/i);
+          const ueCode = (m ? m[1] : text).trim();
+          const ueName = bannerNameFor(blockStartCol, c) || ueCode;
+          ueInfo.set(ueCode, { ueName, credits: creditNum });
+          for (const subj of pending) {
+            subjectInfo.set(this.normalizeText(subj.name), { ueCode, ueName, credits: subj.credits, coefficient: subj.coefficient });
+          }
+          pending = [];
+          blockStartCol = -1;
+        } else if (text) {
+          if (blockStartCol === -1) blockStartCol = c;
+          const coefNum = Number(this.cellString(ws.getCell(coefRow, c)));
+          pending.push({ name: text, credits: creditNum, coefficient: Number.isFinite(coefNum) ? coefNum : creditNum });
+        }
+      }
     }
-    return null;
+
+    return { subjectInfo, ueInfo };
   }
 
   async importGradesFromExcel(buffer: Buffer, semesterId: string, userId: string) {
@@ -1138,41 +1220,6 @@ ${body}
     await workbook.xlsx.load(this.toXlsxBuffer(buffer) as any);
 
     if (workbook.worksheets.length === 0) throw new NotFoundException('Worksheet not found');
-
-    // The file itself says which Année/Semestre it belongs to (e.g. "2014/2015" / "5") — if
-    // that doesn't match the semester currently selected in the UI, importing into it anyway
-    // would silently file historical grades under the wrong (often the current, active)
-    // semester. Route to the matching Semester instead, creating it if it doesn't exist yet,
-    // exactly like an unknown subject or student already gets auto-created.
-    let effectiveSemesterId = semesterId;
-    let semesterSwitch: { from: string; to: { id: string; name: string; year: string }; created: boolean } | null = null;
-    const detected = this.detectFileSemester(workbook);
-    if (detected) {
-      const currentSemester = await this.prisma.semester.findUnique({ where: { id: semesterId } });
-      const currentMatches = currentSemester
-        && this.normalizeSemesterName(currentSemester.name) === detected.semesterName
-        && this.normalizeYear(currentSemester.year) === detected.year;
-      if (!currentMatches) {
-        const allSemesters = await this.prisma.semester.findMany();
-        let target = allSemesters.find((s) =>
-          this.normalizeSemesterName(s.name) === detected.semesterName && this.normalizeYear(s.year) === detected.year,
-        );
-        let created = false;
-        if (!target) {
-          target = await this.prisma.semester.create({
-            data: { name: detected.semesterName, year: detected.year, isActive: false },
-          });
-          created = true;
-        }
-        semesterSwitch = {
-          from: currentSemester ? `${currentSemester.name} (${currentSemester.year})` : semesterId,
-          to: { id: target.id, name: target.name, year: target.year },
-          created,
-        };
-        effectiveSemesterId = target.id;
-      }
-    }
-    semesterId = effectiveSemesterId;
 
     // Loaded once up front (instead of per-row queries) so matching is both faster and
     // resilient to whitespace/case differences between the Excel file and the database.
@@ -1187,18 +1234,11 @@ ${body}
       studentByName.set(key, studentByName.has(key) ? 'AMBIGUOUS' : s);
     }
 
-    const subjects = await this.prisma.subject.findMany({ where: { ue: { semesterId } } });
-    const subjectById = new Map(subjects.map((s) => [s.id, s]));
-    const subjectByName = new Map(subjects.map((s) => [this.normalizeText(s.name), s]));
-
-    // Snapshot of grades that already existed BEFORE this import pass. Re-importing a
-    // relevé after a retake session is how rattrapage gets recorded: if a student already
-    // had an exam grade for a subject, the new Examen value in the sheet is treated as the
-    // rattrapage (which fully replaces the CC/Examen average — see computeSubjectAverage)
-    // instead of overwriting examGrade.
-    const existingGrades = await this.prisma.grade.findMany({ where: { subject: { ue: { semesterId } } } });
-    const existingGradeKey = (studentId: string, subjectId: string) => `${studentId}::${subjectId}`;
-    const existingGradeByKey = new Map(existingGrades.map((g) => [existingGradeKey(g.studentId, g.subjectId), g]));
+    // The REAL per-UE grouping, credits and coefficients — read once from any
+    // TabNotS5/TabNotS6-style recap sheet in the file (see parseTabNotUeInfo). Falls back to
+    // the generic "À classer" placeholder (below) only for a subject this doesn't cover —
+    // e.g. a plain relevé with no accompanying recap sheet at all.
+    const { subjectInfo: realSubjectInfo, ueInfo: realUeInfo } = this.parseTabNotUeInfo(workbook);
 
     let count = 0;
     let skipped = 0;
@@ -1207,18 +1247,123 @@ ${body}
     const createdStudents: string[] = [];
     let anyReleveSheetFound = false;
 
-    // Lazily created once per import: a holding UE for subjects that arrive via a relevé but
-    // don't exist yet — the relevé has no way to say which UE a subject belongs to, so it
-    // lands here (0 credits, doesn't skew any average) until an admin moves it in Gestion
-    // Académique.
-    let placeholderUE: { id: string } | null = null;
-    const getOrCreatePlaceholderUE = async () => {
-      if (placeholderUE) return placeholderUE;
-      const existing = await this.prisma.uE.findFirst({ where: { semesterId, name: 'À classer' } });
-      placeholderUE = existing ?? await this.prisma.uE.create({ data: { name: 'À classer', credits: 0, semesterId } });
-      return placeholderUE;
+    // The file itself says which Année/Semestre each relevé sheet belongs to (e.g.
+    // "2014/2015" / "5") — a workbook can mix several (the reference one has both S5 and S6
+    // relevés together), so this is resolved PER SHEET rather than once for the whole file.
+    // A sheet whose Année/Semestre matches the semester passed in — or declares none at all,
+    // like a plain single-subject relevé — uses that one directly; anything else is routed
+    // to the matching Semester, creating it if it doesn't exist yet, exactly like an unknown
+    // subject or student already gets auto-created.
+    //
+    // A lone sheet is not enough to trust on its own, though — the reference workbook itself
+    // has one relevé with a genuine typo (Semestre "3" instead of "5", surrounded on both
+    // sides by S5 sheets) and another with no Année/Semestre cells at all (a column-layout
+    // quirk unique to that sheet). Neither should spin up its own orphan Semester or silently
+    // fall back to whatever happens to be selected in the UI — both instead inherit whatever
+    // semester the PREVIOUS relevé sheet in the workbook resolved to, since sheets are
+    // naturally grouped by semester in file order. A detection only creates a brand-new
+    // Semester when at least one other sheet corroborates it, or it already exists in the DB.
+    const pairCounts = new Map<string, number>();
+    for (const ws of workbook.worksheets) {
+      if (ws.name === 'Absences' || ExportsService.NON_RELEVE_SHEET.test(ws.name)) continue;
+      const layout = this.locateReleveLayout(ws);
+      if (!layout || !this.cellString(ws.getCell(layout.matiereRow, layout.matiereCol)).trim()) continue;
+      const detected = this.readSheetAnneeSemestre(ws, layout);
+      if (!detected) continue;
+      const key = `${detected.year}::${detected.semesterName}`;
+      pairCounts.set(key, (pairCounts.get(key) ?? 0) + 1);
+    }
+
+    const defaultSemester = await this.prisma.semester.findUnique({ where: { id: semesterId } });
+    const semesterSwitches: { from: string; to: { id: string; name: string; year: string }; created: boolean }[] = [];
+    const semesterIdCache = new Map<string, string>(); // "year::semName" -> resolved semesterId
+    let lastGoodSemesterId = semesterId;
+    const resolveSemesterId = async (detected: { year: string; semesterName: string } | null): Promise<string> => {
+      if (!detected) return lastGoodSemesterId;
+      if (defaultSemester
+        && this.normalizeSemesterName(defaultSemester.name) === detected.semesterName
+        && this.normalizeYear(defaultSemester.year) === detected.year) {
+        lastGoodSemesterId = semesterId;
+        return semesterId;
+      }
+      const cacheKey = `${detected.year}::${detected.semesterName}`;
+      const cached = semesterIdCache.get(cacheKey);
+      if (cached) { lastGoodSemesterId = cached; return cached; }
+
+      const allSemesters = await this.prisma.semester.findMany();
+      const existingMatch = allSemesters.find((s) =>
+        this.normalizeSemesterName(s.name) === detected.semesterName && this.normalizeYear(s.year) === detected.year,
+      );
+      const isCorroborated = (pairCounts.get(cacheKey) ?? 0) >= 2;
+      if (!isCorroborated && !existingMatch) {
+        return lastGoodSemesterId; // a lone, uncorroborated, unrecognized detection — likely bad data on this one sheet
+      }
+
+      let target = existingMatch;
+      let created = false;
+      if (!target) {
+        target = await this.prisma.semester.create({
+          data: { name: detected.semesterName, year: detected.year, isActive: false },
+        });
+        created = true;
+      }
+      semesterSwitches.push({
+        from: defaultSemester ? `${defaultSemester.name} (${defaultSemester.year})` : semesterId,
+        to: { id: target.id, name: target.name, year: target.year },
+        created,
+      });
+      semesterIdCache.set(cacheKey, target.id);
+      lastGoodSemesterId = target.id;
+      return target.id;
     };
 
+    // Subjects/UEs/existing-grades are all Semester-scoped, so each Semester touched by this
+    // import (see above) gets its own lazily-loaded slice of that state instead of one shared
+    // up front for a single assumed semester.
+    type SemesterCtx = {
+      subjectById: Map<string, any>;
+      subjectByName: Map<string, any>;
+      existingGradeByKey: Map<string, any>;
+      placeholderUE: { id: string } | null;
+      realUEByCode: Map<string, { id: string }>;
+    };
+    const existingGradeKey = (studentId: string, subjectId: string) => `${studentId}::${subjectId}`;
+    const semesterContexts = new Map<string, SemesterCtx>();
+    const getSemesterContext = async (semId: string): Promise<SemesterCtx> => {
+      const cached = semesterContexts.get(semId);
+      if (cached) return cached;
+      const semSubjects = await this.prisma.subject.findMany({ where: { ue: { semesterId: semId } } });
+      const semGrades = await this.prisma.grade.findMany({ where: { subject: { ue: { semesterId: semId } } } });
+      const ctx: SemesterCtx = {
+        subjectById: new Map(semSubjects.map((s) => [s.id, s])),
+        subjectByName: new Map(semSubjects.map((s) => [this.normalizeText(s.name), s])),
+        existingGradeByKey: new Map(semGrades.map((g) => [existingGradeKey(g.studentId, g.subjectId), g])),
+        placeholderUE: null,
+        realUEByCode: new Map(),
+      };
+      semesterContexts.set(semId, ctx);
+      return ctx;
+    };
+
+    // Lazily created once per semester touched: a holding UE for subjects that arrive via a
+    // relevé with no matching entry in realSubjectInfo (i.e. no recap sheet says which UE
+    // they belong to) — 0 credits so it never skews a semester average by itself, but its
+    // credits get incremented below as subjects actually land in it, since a UE stuck at 0
+    // divides the semester average and every credits-earned figure by zero.
+    const getOrCreatePlaceholderUE = async (semId: string, ctx: SemesterCtx) => {
+      if (ctx.placeholderUE) return ctx.placeholderUE;
+      const existing = await this.prisma.uE.findFirst({ where: { semesterId: semId, name: 'À classer' } });
+      ctx.placeholderUE = existing ?? await this.prisma.uE.create({ data: { name: 'À classer', credits: 0, semesterId: semId } });
+      return ctx.placeholderUE;
+    };
+    const getOrCreateRealUE = async (semId: string, ctx: SemesterCtx, code: string, name: string, credits: number) => {
+      const cached = ctx.realUEByCode.get(code);
+      if (cached) return cached;
+      const existing = await this.prisma.uE.findFirst({ where: { semesterId: semId, code } });
+      const ue = existing ?? await this.prisma.uE.create({ data: { code, name, credits, semesterId: semId } });
+      ctx.realUEByCode.set(code, ue);
+      return ue;
+    };
 
     const NON_RELEVE_SHEET = ExportsService.NON_RELEVE_SHEET;
 
@@ -1242,38 +1387,47 @@ ${body}
       if (!subjectRef) continue;
       anyReleveSheetFound = true;
 
-      let subject = subjectById.get(subjectRef) ?? subjectByName.get(this.normalizeText(subjectRef));
+      const sheetSemesterId = await resolveSemesterId(this.readSheetAnneeSemestre(worksheet, layout));
+      const ctx = await getSemesterContext(sheetSemesterId);
+
+      let subject = ctx.subjectById.get(subjectRef) ?? ctx.subjectByName.get(this.normalizeText(subjectRef));
       if (!subject) {
         try {
-          const ue = await getOrCreatePlaceholderUE();
-          const coeffCell = Number(worksheet.getCell(layout.coeffRow, layout.matiereCol).value);
+          const info = realSubjectInfo.get(this.normalizeText(subjectRef));
           const teacherName = this.cellString(worksheet.getCell(layout.enseignantRow, layout.matiereCol)).trim();
           let teacher: { id: string } | null = null;
           if (teacherName) {
             const allTeachers = await this.prisma.teacher.findMany();
             teacher = allTeachers.find((t) => this.normalizeText(`${t.firstName} ${t.lastName}`) === this.normalizeText(teacherName)) ?? null;
           }
-          const subjectCredits = 2; // schema default — the relevé has no credits column to read
-          subject = await this.prisma.subject.create({
-            data: {
-              name: subjectRef,
-              coefficient: Number.isFinite(coeffCell) && coeffCell > 0 ? coeffCell : 1,
-              credits: subjectCredits,
-              ueId: ue.id,
-              teacherId: teacher?.id,
-            },
-          });
-          subjectById.set(subject.id, subject);
-          subjectByName.set(this.normalizeText(subject.name), subject);
-          createdSubjects.push(subject.name);
 
-          // The placeholder UE starts at 0 credits ("doesn't skew any average" — see
-          // getOrCreatePlaceholderUE) but that's only true while it's EMPTY: once subjects
-          // land in it, a UE stuck at 0 credits divides the semester average and every
-          // credits-earned computation by zero, silently reporting "Moyenne Semestre 0/20,
-          // 0 crédits" even though every individual subject grade imported correctly. Its
-          // credits must track the subjects actually placed there.
-          await this.prisma.uE.update({ where: { id: ue.id }, data: { credits: { increment: subjectCredits } } });
+          let ueId: string;
+          let subjectCredits: number;
+          let subjectCoefficient: number;
+          if (info) {
+            // The recap sheet gives the real UE grouping, credits and coefficient — this is
+            // what makes an import of the reference workbook land subjects in "UE5-1 :
+            // ENSEIGNEMENT GENERAL" etc. with their actual credit weight, instead of a
+            // uniform placeholder.
+            const ue = await getOrCreateRealUE(sheetSemesterId, ctx, info.ueCode, info.ueName, realUeInfo.get(info.ueCode)?.credits ?? info.credits);
+            ueId = ue.id;
+            subjectCredits = info.credits;
+            subjectCoefficient = info.coefficient;
+          } else {
+            const ue = await getOrCreatePlaceholderUE(sheetSemesterId, ctx);
+            const coeffCell = Number(worksheet.getCell(layout.coeffRow, layout.matiereCol).value);
+            ueId = ue.id;
+            subjectCredits = 2; // schema default — no recap sheet to read a real one from
+            subjectCoefficient = Number.isFinite(coeffCell) && coeffCell > 0 ? coeffCell : 1;
+            await this.prisma.uE.update({ where: { id: ue.id }, data: { credits: { increment: subjectCredits } } });
+          }
+
+          subject = await this.prisma.subject.create({
+            data: { name: subjectRef, coefficient: subjectCoefficient, credits: subjectCredits, ueId, teacherId: teacher?.id },
+          });
+          ctx.subjectById.set(subject.id, subject);
+          ctx.subjectByName.set(this.normalizeText(subject.name), subject);
+          createdSubjects.push(subject.name);
         } catch (e) {
           skipped++;
           errors.push(`${worksheet.name}: échec de création de la matière ("${subjectRef}") — ${e instanceof Error ? e.message : 'erreur inconnue'}`);
@@ -1343,7 +1497,7 @@ ${body}
         // rattrapage (retake), not a first-time exam entry. It replaces the average
         // entirely (computeSubjectAverage), so it's routed to rattrapageGrade and the
         // original examGrade is left untouched.
-        const existing = existingGradeByKey.get(existingGradeKey(student.id, subject.id));
+        const existing = ctx.existingGradeByKey.get(existingGradeKey(student.id, subject.id));
         const isRetake = existing?.examGrade != null && exam.value !== undefined;
 
         try {
@@ -1370,12 +1524,12 @@ ${body}
     }
 
     // Birth date/place, Bac type and provenance never appear on a relevé sheet — the
-    // reference workbook only carries them on its "TabNotS5"/"TabNotS6" recap sheet. Scan
-    // for one and backfill any student still missing that info (never overwrite what's
-    // already there, so a manual correction in Gestion Étudiants always wins).
+    // reference workbook only carries them on its "TabNotS5"/"TabNotS6" recap sheets (a file
+    // covering both semesters has BOTH, so every matching sheet is scanned, not just the
+    // first). Backfills any student still missing that info (never overwrites what's already
+    // there, so a manual correction in Gestion Étudiants always wins).
     let demographicsUpdated = 0;
-    const tabNotSheet = workbook.worksheets.find((w) => /^tabnot/i.test(w.name));
-    if (tabNotSheet) {
+    for (const tabNotSheet of workbook.worksheets.filter((w) => /^tabnot/i.test(w.name))) {
       let naissanceCol = -1, bacCol = -1, provenanceCol = -1, headerRow = -1;
       const NOM_COL = 2;
       for (let r = 1; r <= 20 && naissanceCol === -1; r++) {
@@ -1421,6 +1575,7 @@ ${body}
           if (Object.keys(update).length > 0) {
             try {
               await this.prisma.student.update({ where: { id: student.id }, data: update });
+              Object.assign(student, update); // so a later TabNotS6 pass doesn't redo the same update
               demographicsUpdated++;
             } catch {
               // best-effort — a failure here never blocks the grade import itself
@@ -1434,7 +1589,7 @@ ${body}
       imported: count,
       skipped,
       errors,
-      semesterSwitch,
+      semesterSwitches,
       demographicsUpdated,
       created: { subjects: createdSubjects, students: createdStudents },
     };
