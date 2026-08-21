@@ -961,11 +961,6 @@ ${body}
     return { value };
   }
 
-  // Matches the "{Subject} — CC/EXAMEN/RATTRAPAGE" column headers produced by
-  // generateTemplate's pivot layout. Reading the header (rather than assuming fixed
-  // column positions) keeps import working even if columns get reordered in Excel.
-  private static readonly GRADE_COLUMN_HEADER = /^(.+?)\s*[—–-]\s*(CC|EXAMEN|RATTRAPAGE)\s*$/i;
-
   async importGradesFromExcel(buffer: Buffer, semesterId: string, userId: string) {
     const workbook = new ExcelJS.Workbook();
     await workbook.xlsx.load(buffer as any);
@@ -985,92 +980,69 @@ ${body}
     let count = 0;
     let skipped = 0;
     const errors: string[] = [];
-    let anyGradeColumnsFound = false;
+    let anyReleveSheetFound = false;
+    const R = ExportsService.RELEVE;
 
-    // Two-sheet layout (CC/Examen on one sheet, Rattrapage on another) or a single sheet
-    // with all three — either way, every sheet is scanned for "{Subject} — CC/EXAMEN/RATTRAPAGE"
-    // headers and processed the same way, so both layouts import correctly.
+    // Each sheet is one subject's "relevé de notes" (see buildReleveSheet) — the subject
+    // is read from the fixed "Matière :" cell rather than the sheet tab (which is
+    // sanitized/truncated for Excel and isn't reliable for matching).
     for (const worksheet of workbook.worksheets) {
-      const headerRow = worksheet.getRow(1);
-      const gradeColumns: { col: number; field: 'cc' | 'exam' | 'rattr'; subjectRef: string }[] = [];
-      for (let c = 4; c <= worksheet.columnCount; c++) {
-        const headerText = headerRow.getCell(c).toString().trim();
-        const match = headerText.match(ExportsService.GRADE_COLUMN_HEADER);
-        if (!match) continue;
-        const field = match[2].toUpperCase() === 'CC' ? 'cc' : match[2].toUpperCase() === 'EXAMEN' ? 'exam' : 'rattr';
-        gradeColumns.push({ col: c, field, subjectRef: match[1].trim() });
+      const subjectRef = worksheet.getCell(R.MATIERE_ROW, R.MATIERE_COL).toString().trim();
+      const headerLabel = worksheet.getCell(R.HEADER_ROW, R.COL_MATRICULE).toString().trim();
+      if (!subjectRef || !headerLabel.toLowerCase().startsWith('matricule')) continue; // not a relevé sheet
+      anyReleveSheetFound = true;
+
+      const subject = subjectById.get(subjectRef) ?? subjectByName.get(this.normalizeText(subjectRef));
+      if (!subject) {
+        skipped++;
+        errors.push(`${worksheet.name}: matière introuvable pour ce semestre ("${subjectRef}")`);
+        continue;
       }
 
-      if (gradeColumns.length === 0) continue; // e.g. an unrelated/instructions sheet
-      anyGradeColumnsFound = true;
+      for (let i = R.HEADER_ROW + 1; i <= worksheet.rowCount; i++) {
+        const row = worksheet.getRow(i);
+        const studentRef = row.getCell(R.COL_MATRICULE).toString().trim();
+        if (!studentRef) break; // end of the student list for this sheet
 
-      for (let i = 2; i <= worksheet.rowCount; i++) {
-          const row = worksheet.getRow(i);
-          const studentRef = row.getCell(1).toString().trim();
+        const student = studentById.get(studentRef) ?? studentByMatricule.get(this.normalizeText(studentRef));
+        if (!student) {
+          skipped++;
+          errors.push(`${worksheet.name} - Ligne ${i}: étudiant introuvable ("${studentRef}")`);
+          continue;
+        }
 
-          if (!studentRef) {
-            continue; // blank row
-          }
+        const cc = this.parseGradeCell(row.getCell(R.COL_CC).toString().trim(), 'Note CC');
+        const exam = this.parseGradeCell(row.getCell(R.COL_EXAM).toString().trim(), 'Note Examen');
+        const rattr = this.parseGradeCell(row.getCell(R.COL_RATTR).toString().trim(), 'Note Rattrapage');
+        const rowErrors = [cc.error, exam.error, rattr.error].filter(Boolean);
+        if (rowErrors.length > 0) {
+          skipped++;
+          errors.push(`${worksheet.name} - Ligne ${i} (${student.studentId}): ${rowErrors.join(', ')}`);
+          continue;
+        }
+        if (cc.value === undefined && exam.value === undefined && rattr.value === undefined) {
+          continue; // left blank for this student — not an error
+        }
 
-          const student = studentById.get(studentRef) ?? studentByMatricule.get(this.normalizeText(studentRef));
-          if (!student) {
-            skipped++;
-            errors.push(`${worksheet.name} - Ligne ${i}: étudiant introuvable ("${studentRef}")`);
-            continue;
-          }
-
-          // Group this row's CC/EXAMEN/RATTRAPAGE cells by subject; subjects left entirely
-          // blank for this student are simply skipped (not counted as an error).
-          const bySubject = new Map<string, { cc?: string; exam?: string; rattr?: string }>();
-          for (const { col, field, subjectRef } of gradeColumns) {
-            const raw = row.getCell(col).toString().trim();
-            if (raw === '') continue;
-            const entry = bySubject.get(subjectRef) ?? {};
-            entry[field] = raw;
-            bySubject.set(subjectRef, entry);
-          }
-
-          for (const [subjectRef, values] of bySubject) {
-            const subject = subjectById.get(subjectRef) ?? subjectByName.get(this.normalizeText(subjectRef));
-            if (!subject) {
-              skipped++;
-              errors.push(`${worksheet.name} - Ligne ${i} (${student.studentId}): matière introuvable pour ce semestre ("${subjectRef}")`);
-              continue;
-            }
-
-            const cc = this.parseGradeCell(values.cc ?? '', 'Note CC');
-            const exam = this.parseGradeCell(values.exam ?? '', 'Note Examen');
-            const rattr = this.parseGradeCell(values.rattr ?? '', 'Note Rattrapage');
-            const rowErrors = [cc.error, exam.error, rattr.error].filter(Boolean);
-            if (rowErrors.length > 0) {
-              skipped++;
-              errors.push(`${worksheet.name} - Ligne ${i} (${student.studentId}/${subject.name}): ${rowErrors.join(', ')}`);
-              continue;
-            }
-
-            try {
-              // Each sheet only supplies some of the fields (e.g. the Rattrapage sheet
-              // leaves cc/exam undefined) — enterGrade's upsert only touches the fields
-              // it's given, so calling it once per sheet never clobbers the other sheet's data.
-              await this.gradesService.enterGrade({
-                  studentId: student.id,
-                  subjectId: subject.id,
-                  ccGrade: cc.value,
-                  examGrade: exam.value,
-                  rattrapageGrade: rattr.value,
-              }, userId);
-              count++;
-            } catch (e) {
-              skipped++;
-              errors.push(`${worksheet.name} - Ligne ${i} (${student.studentId}/${subject.name}): ${e instanceof Error ? e.message : 'erreur inconnue'}`);
-            }
-          }
+        try {
+          await this.gradesService.enterGrade({
+              studentId: student.id,
+              subjectId: subject.id,
+              ccGrade: cc.value,
+              examGrade: exam.value,
+              rattrapageGrade: rattr.value,
+          }, userId);
+          count++;
+        } catch (e) {
+          skipped++;
+          errors.push(`${worksheet.name} - Ligne ${i} (${student.studentId}): ${e instanceof Error ? e.message : 'erreur inconnue'}`);
+        }
       }
     }
 
-    if (!anyGradeColumnsFound) {
+    if (!anyReleveSheetFound) {
       throw new NotFoundException(
-        "Aucune colonne de notes reconnue (attendu : \"Matière — CC\", \"Matière — EXAMEN\", \"Matière — RATTRAPAGE\"). " +
+        'Aucun onglet "relevé de notes" reconnu dans ce fichier. ' +
         "Utilisez le canevas généré par l'application (bouton \"Canevas notes\").",
       );
     }
@@ -1119,84 +1091,181 @@ ${body}
       });
       this.styleTemplateHeaderRow(worksheet);
     } else {
-      // Two sheets: CC/Examen on one page, Rattrapage on its own — split per the
-      // school's marking workflow (regular session vs. retake session), instead of one
-      // combined page. Both are pivoted (one row per student, one column pair/single per
-      // subject) so neither the student nor the subject name is ever repeated.
+      // One "RELEVÉ DE NOTES" sheet per subject — mirrors the school's own historical
+      // gradebook (ASUR 2014-2015.xls: one signed relevé per subject, with the institution
+      // header, Classe/Année/Matière/Coefficient/Semestre/Enseignant block, a N°/Élèves/
+      // CC/Examen/Moyenne table, and signature lines) instead of a generic spreadsheet.
       const subjects = semesterId
         ? await this.prisma.subject.findMany({
             where: { ue: { semesterId } },
-            include: { ue: true },
+            include: { ue: true, teacher: true },
             orderBy: [{ ue: { name: 'asc' } }, { name: 'asc' }],
           })
         : [];
       const students = semesterId
         ? await this.prisma.student.findMany({ orderBy: [{ lastName: 'asc' }, { firstName: 'asc' }] })
         : [];
-      const effectiveSubjects = subjects.length > 0 ? subjects : [{ id: 'sample', name: 'Anglais technique' } as any];
-      const noSubjectsMessage = 'Aucune matière enregistrée pour ce semestre — créez-les dans Gestion académique avant d\'importer des notes.';
-
-      const identityColumns = [
-        { header: 'MATRICULE', key: 'studentId', width: 20 },
-        { header: 'NOM', key: 'lastName', width: 22 },
-        { header: 'PRÉNOM', key: 'firstName', width: 22 },
-      ];
-
-      // --- Sheet 1: CC + Examen ---
-      const ccExamSheet = workbook.addWorksheet('Notes CC-Examen');
-      const ccExamColumns = [...identityColumns];
-      effectiveSubjects.forEach((subject, idx) => {
-        ccExamColumns.push({ header: `${subject.name} — CC`, key: `s${idx}_cc`, width: 14 });
-        ccExamColumns.push({ header: `${subject.name} — EXAMEN`, key: `s${idx}_exam`, width: 14 });
-      });
-      ccExamSheet.columns = ccExamColumns;
-      ccExamSheet.getCell('A1').note =
-        'MATRICULE, NOM et PRÉNOM sont pré-remplis, et chaque matière a ses colonnes CC / EXAMEN — ' +
-        'il ne reste qu\'à saisir les notes. Les rattrapages se saisissent sur l\'onglet "Rattrapage". ' +
-        'Ne modifiez pas les en-têtes de colonnes : ils servent à retrouver la matière lors de l\'import.';
-
-      // --- Sheet 2: Rattrapage only ---
-      const rattrSheet = workbook.addWorksheet('Rattrapage');
-      const rattrColumns = [...identityColumns];
-      effectiveSubjects.forEach((subject, idx) => {
-        rattrColumns.push({ header: `${subject.name} — RATTRAPAGE`, key: `s${idx}_rattr`, width: 16 });
-      });
-      rattrSheet.columns = rattrColumns;
-      rattrSheet.getCell('A1').note =
-        'Ne renseignez ici que les notes de rattrapage — laissez vide pour les étudiants non concernés. ' +
-        'Ne modifiez pas les en-têtes de colonnes : ils servent à retrouver la matière lors de l\'import.';
+      const semester = semesterId ? await this.prisma.semester.findUnique({ where: { id: semesterId } }) : null;
 
       if (semesterId && subjects.length === 0) {
-        ccExamSheet.addRow({ studentId: '', lastName: '', firstName: '', s0_cc: noSubjectsMessage });
-        rattrSheet.addRow({ studentId: '', lastName: '', firstName: '', s0_rattr: noSubjectsMessage });
-      } else if (semesterId) {
-        for (const student of students) {
-          const identity = { studentId: student.studentId, lastName: student.lastName, firstName: student.firstName };
-
-          const ccExamRow: any = { ...identity };
-          const rattrRow: any = { ...identity };
-          effectiveSubjects.forEach((_subject, idx) => {
-            ccExamRow[`s${idx}_cc`] = '';
-            ccExamRow[`s${idx}_exam`] = '';
-            rattrRow[`s${idx}_rattr`] = '';
-          });
-          ccExamSheet.addRow(ccExamRow);
-          rattrSheet.addRow(rattrRow);
-        }
+        const worksheet = workbook.addWorksheet('Relevé');
+        worksheet.addRow(['Aucune matière enregistrée pour ce semestre — créez-les dans Gestion académique avant d\'importer des notes.']);
       } else {
-        // Generic fallback sample when no semester context is available.
-        ccExamSheet.addRow({ studentId: 'INPTIC-2024-001', lastName: 'DUPONT', firstName: 'Jean', s0_cc: 14.5, s0_exam: 12 });
-        rattrSheet.addRow({ studentId: 'INPTIC-2024-001', lastName: 'DUPONT', firstName: 'Jean', s0_rattr: '' });
-      }
+        const effectiveSubjects = subjects.length > 0
+          ? subjects
+          : [{ id: 'sample', name: 'Anglais technique', coefficient: 1, ccWeight: 0.4, examWeight: 0.6, teacher: null } as any];
+        const effectiveStudents = students.length > 0
+          ? students
+          : [{ studentId: 'INPTIC-2024-001', lastName: 'DUPONT', firstName: 'Jean' } as any];
 
-      ccExamSheet.views = [{ state: 'frozen', xSplit: 3, ySplit: 1 }];
-      rattrSheet.views = [{ state: 'frozen', xSplit: 3, ySplit: 1 }];
-      this.styleTemplateHeaderRow(ccExamSheet);
-      this.styleTemplateHeaderRow(rattrSheet);
+        const usedSheetNames = new Set<string>();
+        for (const subject of effectiveSubjects) {
+          this.buildReleveSheet(workbook, {
+            subjectName: subject.name,
+            coefficient: subject.coefficient,
+            ccWeight: subject.ccWeight ?? 0.4,
+            examWeight: subject.examWeight ?? 0.6,
+            teacherName: subject.teacher ? `${subject.teacher.firstName} ${subject.teacher.lastName}` : undefined,
+            className: students[0]?.class,
+            year: semester?.year,
+            semesterName: semester?.name,
+            students: effectiveStudents,
+          }, usedSheetNames);
+        }
+      }
     }
 
     const buffer = await workbook.xlsx.writeBuffer();
     return Buffer.from(buffer);
+  }
+
+  // Row/column layout the "relevé de notes" sheets below use — importGradesFromExcel reads
+  // these exact positions back, since this service both generates and parses the file.
+  private static readonly RELEVE = {
+    MATIERE_ROW: 7, MATIERE_COL: 2,
+    HEADER_ROW: 11,
+    COL_NUM: 1, COL_MATRICULE: 2, COL_ELEVE: 3, COL_CC: 4, COL_EXAM: 5, COL_RATTR: 6, COL_MOY: 7,
+  } as const;
+
+  private buildReleveSheet(
+    workbook: ExcelJS.Workbook,
+    data: {
+      subjectName: string;
+      coefficient: number;
+      ccWeight: number;
+      examWeight: number;
+      teacherName?: string;
+      className?: string;
+      year?: string;
+      semesterName?: string;
+      students: { studentId: string; lastName: string; firstName: string }[];
+    },
+    usedSheetNames: Set<string>,
+  ) {
+    const R = ExportsService.RELEVE;
+    const sheetName = this.uniqueSheetName(data.subjectName, usedSheetNames);
+    const ws = workbook.addWorksheet(sheetName);
+    ws.columns = [
+      { width: 6 }, { width: 18 }, { width: 34 }, { width: 14 }, { width: 14 }, { width: 14 }, { width: 12 },
+    ];
+
+    const centerBold = (cell: ExcelJS.Cell, size = 9) => { cell.font = { bold: true, size }; cell.alignment = { horizontal: 'center' }; };
+
+    ws.mergeCells(1, 1, 1, 7);
+    centerBold(ws.getCell(1, 1), 9);
+    ws.getCell(1, 1).value = 'INSTITUT NATIONAL DE LA POSTE, DES TECHNOLOGIES DE L\'INFORMATION ET DE LA COMMUNICATION';
+    ws.mergeCells(2, 1, 2, 7);
+    centerBold(ws.getCell(2, 1), 9);
+    ws.getCell(2, 1).value = 'DIRECTION DES ETUDES ET DE LA PEDAGOGIE';
+
+    ws.mergeCells(4, 1, 4, 7);
+    const title = ws.getCell(4, 1);
+    title.value = 'RELEVE DE NOTES';
+    title.font = { bold: true, size: 13 };
+    title.alignment = { horizontal: 'center' };
+
+    ws.getCell(6, 1).value = 'Classe :';
+    ws.getCell(6, 2).value = data.className || '';
+    ws.getCell(6, 5).value = 'Année :';
+    ws.getCell(6, 6).value = data.year || '';
+
+    ws.getCell(R.MATIERE_ROW, 1).value = 'Matière :';
+    ws.getCell(R.MATIERE_ROW, R.MATIERE_COL).value = data.subjectName;
+    ws.getCell(R.MATIERE_ROW, R.MATIERE_COL).font = { bold: true };
+
+    ws.getCell(8, 1).value = 'Coefficient :';
+    ws.getCell(8, 2).value = data.coefficient;
+    ws.getCell(8, 5).value = 'Semestre :';
+    ws.getCell(8, 6).value = data.semesterName || '';
+
+    ws.getCell(9, 1).value = 'Enseignant :';
+    ws.getCell(9, 2).value = data.teacherName || '.....................................';
+
+    const headerRow = ws.getRow(R.HEADER_ROW);
+    headerRow.values = [
+      'N°', 'Matricule', 'Élèves',
+      `Contrôle Continu ${Math.round(data.ccWeight * 100)}%`,
+      `Examen Final ${Math.round(data.examWeight * 100)}%`,
+      'Rattrapage',
+      'Moyenne',
+    ];
+    headerRow.font = { bold: true };
+    headerRow.alignment = { horizontal: 'center', wrapText: true };
+    headerRow.eachCell((cell) => {
+      cell.fill = { type: 'pattern', pattern: 'solid', fgColor: { argb: 'FFE0E0E0' } };
+      cell.border = { top: { style: 'thin' }, bottom: { style: 'thin' }, left: { style: 'thin' }, right: { style: 'thin' } };
+    });
+
+    let r = R.HEADER_ROW + 1;
+    data.students.forEach((student, idx) => {
+      const row = ws.getRow(r);
+      row.getCell(R.COL_NUM).value = idx + 1;
+      row.getCell(R.COL_MATRICULE).value = student.studentId;
+      row.getCell(R.COL_ELEVE).value = `${student.lastName} ${student.firstName}`;
+      // Moyenne is a live preview only (CC×weight + Examen×weight, replaced by Rattrapage
+      // when filled) — the app recomputes the authoritative average itself on import.
+      const ccRef = `D${r}`, examRef = `E${r}`, rattrRef = `F${r}`;
+      row.getCell(R.COL_MOY).value = {
+        formula: `IF(${rattrRef}<>"",${rattrRef},IF(AND(${ccRef}<>"",${examRef}<>""),${ccRef}*${data.ccWeight}+${examRef}*${data.examWeight},IF(${ccRef}<>"",${ccRef},IF(${examRef}<>"",${examRef},""))))`,
+      };
+      r += 1;
+    });
+    const lastDataRow = r - 1;
+
+    r += 1;
+    ws.getCell(r, 1).value = 'Moyenne de la classe :';
+    ws.getCell(r, 1).font = { italic: true };
+    if (lastDataRow >= R.HEADER_ROW + 1) {
+      ws.getCell(r, R.COL_MOY).value = { formula: `IFERROR(AVERAGE(G${R.HEADER_ROW + 1}:G${lastDataRow}),"")` };
+    }
+
+    r += 2;
+    ws.getCell(r, 1).value = 'Date : .....................';
+    r += 2;
+    ws.getCell(r, 1).value = "Signature de l'Enseignant";
+    ws.getCell(r, 5).value = 'Visa Responsable Pédagogique';
+    ws.getCell(r, 1).font = { italic: true, size: 8 };
+    ws.getCell(r, 5).font = { italic: true, size: 8 };
+
+    ws.getCell(R.MATIERE_ROW, 1).note =
+      'Cette cellule identifie la matière pour l\'import — ne la modifiez pas. ' +
+      'Seules les colonnes Contrôle Continu, Examen Final et Rattrapage sont à remplir ; ' +
+      'la Moyenne est calculée automatiquement à titre indicatif.';
+    ws.views = [{ state: 'frozen', ySplit: R.HEADER_ROW }];
+  }
+
+  private uniqueSheetName(subjectName: string, used: Set<string>): string {
+    // Excel sheet names: max 31 chars, and : \ / ? * [ ] are forbidden.
+    let base = subjectName.replace(/[:\\/?*[\]]/g, ' ').trim().slice(0, 31) || 'Matière';
+    let name = base;
+    let i = 2;
+    while (used.has(name)) {
+      const suffix = ` (${i})`;
+      name = base.slice(0, 31 - suffix.length) + suffix;
+      i += 1;
+    }
+    used.add(name);
+    return name;
   }
 
   // Real data export (as opposed to generateTemplate, which is always a blank canvas) —
