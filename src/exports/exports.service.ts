@@ -1039,6 +1039,7 @@ ${body}
   // formats (one row below/above respectively, same column), so they're derived from it too.
   private locateReleveLayout(ws: ExcelJS.Worksheet): {
     matiereRow: number; matiereCol: number; classeRow: number; coeffRow: number; enseignantRow: number;
+    anneeCol: number; semestreCol: number;
     headerRow: number; colNum: number; colEleve: number; colCC: number; colExam: number; colMoy: number;
   } | null {
     const MAX_ROWS = 25;
@@ -1063,9 +1064,55 @@ ${body}
     return {
       matiereRow, matiereCol,
       classeRow: matiereRow - 1, coeffRow: matiereRow + 1, enseignantRow: matiereRow + 2,
+      // "Année :" sits next to "Classe :" and "Semestre :" next to "Coefficient :" — the
+      // label itself is one column right of the Matière value, its actual value one more
+      // (see buildReleveSheet: Matière value in col B, "Année :"/"Semestre :" labels in col
+      // D, their values in col E) — used to auto-detect which Semester a file actually
+      // belongs to instead of trusting only the caller's selection.
+      anneeCol: matiereCol + 3, semestreCol: matiereCol + 3,
       headerRow,
       colNum: colEleve - 1, colEleve, colCC: colEleve + 1, colExam: colEleve + 2, colMoy: colEleve + 3,
     };
+  }
+
+  // Parses "2014/2015" or "2024-2025" into a normalized "YYYY-YYYY" key, and a numeric
+  // semester ("5", or "S5") into "S5" — so a file's own Année/Semestre cells can be matched
+  // against whatever separator style an existing Semester record happens to use.
+  private normalizeYear(raw: string): string | null {
+    const m = raw.match(/(\d{4})\D+(\d{4})/) || raw.match(/(\d{4})/);
+    if (!m) return null;
+    return m[2] ? `${m[1]}-${m[2]}` : m[1];
+  }
+  private normalizeSemesterName(raw: string): string | null {
+    const m = raw.match(/\d+/);
+    if (!m) return null;
+    return `S${m[0]}`;
+  }
+
+  // Reads the Année/Semestre a relevé sheet declares, so importGradesFromExcel can route
+  // the file to the Semester it actually belongs to instead of blindly trusting whichever
+  // semester happens to be selected in the UI — the exact mismatch that silently filed a
+  // 2014/2015 gradebook under the currently active 2025-2026 semester.
+  // Sheets that are never a relevé, whatever their internal layout — our own canvas
+  // (FV/TabNote/Bulletin/Absences) and the reference workbook's own recap sheets
+  // (TabNotS5/BULLETIN S5/TabNotS6/BULLETIN S6/TabAnnuel/BullAnnuel/empty Feuil2-3). Note
+  // the reference's own "Absences" sheet also happens to carry a "Matière :"/"Élèves :"
+  // pair (Matière="Absences"), so it must be excluded explicitly rather than relying on
+  // locateReleveLayout alone to tell it apart from a real relevé.
+  private static readonly NON_RELEVE_SHEET = /^(fv|absences|tabnote|bulletin|tabnots|tabannuel|bullannuel|feuil)/i;
+
+  private detectFileSemester(workbook: ExcelJS.Workbook): { year: string; semesterName: string } | null {
+    for (const ws of workbook.worksheets) {
+      if (ExportsService.NON_RELEVE_SHEET.test(ws.name)) continue;
+      const layout = this.locateReleveLayout(ws);
+      if (!layout) continue;
+      const anneeRaw = this.cellString(ws.getCell(layout.classeRow, layout.anneeCol)).trim();
+      const semestreRaw = this.cellString(ws.getCell(layout.coeffRow, layout.semestreCol)).trim();
+      const year = anneeRaw ? this.normalizeYear(anneeRaw) : null;
+      const semesterName = semestreRaw ? this.normalizeSemesterName(semestreRaw) : null;
+      if (year && semesterName) return { year, semesterName };
+    }
+    return null;
   }
 
   async importGradesFromExcel(buffer: Buffer, semesterId: string, userId: string) {
@@ -1073,6 +1120,41 @@ ${body}
     await workbook.xlsx.load(this.toXlsxBuffer(buffer) as any);
 
     if (workbook.worksheets.length === 0) throw new NotFoundException('Worksheet not found');
+
+    // The file itself says which Année/Semestre it belongs to (e.g. "2014/2015" / "5") — if
+    // that doesn't match the semester currently selected in the UI, importing into it anyway
+    // would silently file historical grades under the wrong (often the current, active)
+    // semester. Route to the matching Semester instead, creating it if it doesn't exist yet,
+    // exactly like an unknown subject or student already gets auto-created.
+    let effectiveSemesterId = semesterId;
+    let semesterSwitch: { from: string; to: { id: string; name: string; year: string }; created: boolean } | null = null;
+    const detected = this.detectFileSemester(workbook);
+    if (detected) {
+      const currentSemester = await this.prisma.semester.findUnique({ where: { id: semesterId } });
+      const currentMatches = currentSemester
+        && this.normalizeSemesterName(currentSemester.name) === detected.semesterName
+        && this.normalizeYear(currentSemester.year) === detected.year;
+      if (!currentMatches) {
+        const allSemesters = await this.prisma.semester.findMany();
+        let target = allSemesters.find((s) =>
+          this.normalizeSemesterName(s.name) === detected.semesterName && this.normalizeYear(s.year) === detected.year,
+        );
+        let created = false;
+        if (!target) {
+          target = await this.prisma.semester.create({
+            data: { name: detected.semesterName, year: detected.year, isActive: false },
+          });
+          created = true;
+        }
+        semesterSwitch = {
+          from: currentSemester ? `${currentSemester.name} (${currentSemester.year})` : semesterId,
+          to: { id: target.id, name: target.name, year: target.year },
+          created,
+        };
+        effectiveSemesterId = target.id;
+      }
+    }
+    semesterId = effectiveSemesterId;
 
     // Loaded once up front (instead of per-row queries) so matching is both faster and
     // resilient to whitespace/case differences between the Excel file and the database.
@@ -1119,10 +1201,7 @@ ${body}
       return placeholderUE;
     };
 
-    // Sheets that are never a relevé, whatever their internal layout — our own canvas
-    // (FV/TabNote/Bulletin/Absences) and the reference workbook's own recap sheets
-    // (TabNotS5/BULLETIN S5/TabNotS6/BULLETIN S6/TabAnnuel/BullAnnuel/empty Feuil2-3).
-    const NON_RELEVE_SHEET = /^(fv|absences|tabnote|bulletin|tabnots|tabannuel|bullannuel|feuil)/i;
+    const NON_RELEVE_SHEET = ExportsService.NON_RELEVE_SHEET;
 
     // Each sheet is one subject's "relevé de notes" — the subject name is read from its
     // "Matière :" cell (located dynamically, see locateReleveLayout) rather than the sheet
@@ -1260,10 +1339,73 @@ ${body}
       );
     }
 
+    // Birth date/place, Bac type and provenance never appear on a relevé sheet — the
+    // reference workbook only carries them on its "TabNotS5"/"TabNotS6" recap sheet. Scan
+    // for one and backfill any student still missing that info (never overwrite what's
+    // already there, so a manual correction in Gestion Étudiants always wins).
+    let demographicsUpdated = 0;
+    const tabNotSheet = workbook.worksheets.find((w) => /^tabnot/i.test(w.name));
+    if (tabNotSheet) {
+      let naissanceCol = -1, bacCol = -1, provenanceCol = -1, headerRow = -1;
+      const NOM_COL = 2;
+      for (let r = 1; r <= 20 && naissanceCol === -1; r++) {
+        for (let c = 1; c <= 60; c++) {
+          const text = this.normalizeText(this.cellString(tabNotSheet.getCell(r, c)));
+          if (text.includes('date et lieu de naissance')) { naissanceCol = c; headerRow = r; }
+          if (text.includes('type de bac')) bacCol = c;
+          if (text.includes('provenance')) provenanceCol = c;
+        }
+      }
+      if (naissanceCol !== -1) {
+        // headerRow is wherever "Date et lieu de naissance" was found, which can still be
+        // followed by another header row (e.g. a "Coefficients" row) before real data
+        // starts — so blank rows are skipped, not treated as the end of the list, until at
+        // least one student row has actually been seen.
+        let started = false;
+        for (let i = headerRow + 1; i <= tabNotSheet.rowCount; i++) {
+          const row = tabNotSheet.getRow(i);
+          const name = this.cellString(row.getCell(NOM_COL)).trim();
+          if (!name) { if (started) break; else continue; }
+          started = true;
+          const match = studentByName.get(this.normalizeText(name));
+          if (!match || match === 'AMBIGUOUS') continue;
+          const student = match;
+
+          const naissanceRaw = this.cellString(row.getCell(naissanceCol)).trim();
+          const dateMatch = naissanceRaw.match(/(\d{2})\/(\d{2})\/(\d{4})/);
+          const placeMatch = naissanceRaw.match(/à\s+(.+)$/i);
+          const bacRaw = bacCol !== -1 ? this.cellString(row.getCell(bacCol)).trim() : '';
+          const provRaw = provenanceCol !== -1 ? this.cellString(row.getCell(provenanceCol)).trim() : '';
+
+          const update: Record<string, unknown> = {};
+          if (dateMatch && !student.birthDate) {
+            const [, dd, mm, yyyy] = dateMatch;
+            const parsed = new Date(Date.UTC(Number(yyyy), Number(mm) - 1, Number(dd)));
+            if (!Number.isNaN(parsed.getTime())) update.birthDate = parsed;
+          }
+          const place = placeMatch?.[1]?.trim();
+          if (place && !student.birthPlace) update.birthPlace = place;
+          if (bacRaw && !student.bacType) update.bacType = bacRaw;
+          if (provRaw && !student.provenance) update.provenance = provRaw;
+
+          if (Object.keys(update).length > 0) {
+            try {
+              await this.prisma.student.update({ where: { id: student.id }, data: update });
+              demographicsUpdated++;
+            } catch {
+              // best-effort — a failure here never blocks the grade import itself
+            }
+          }
+        }
+      }
+    }
+
     return {
       imported: count,
       skipped,
       errors,
+      semesterSwitch,
+      demographicsUpdated,
       created: { subjects: createdSubjects, students: createdStudents },
     };
   }
