@@ -1334,11 +1334,15 @@ ${body}
       if (cached) return cached;
       const semSubjects = await this.prisma.subject.findMany({ where: { ue: { semesterId: semId } } });
       const semGrades = await this.prisma.grade.findMany({ where: { subject: { ue: { semesterId: semId } } } });
+      // Fetched eagerly (not just lazily on first creation) so an already-existing subject
+      // still sitting in it can be recognized as "unclassified" below, even on a run that
+      // creates no new subject there itself.
+      const placeholderUE = await this.prisma.uE.findFirst({ where: { semesterId: semId, name: 'À classer' } });
       const ctx: SemesterCtx = {
         subjectById: new Map(semSubjects.map((s) => [s.id, s])),
         subjectByName: new Map(semSubjects.map((s) => [this.normalizeText(s.name), s])),
         existingGradeByKey: new Map(semGrades.map((g) => [existingGradeKey(g.studentId, g.subjectId), g])),
-        placeholderUE: null,
+        placeholderUE: placeholderUE ?? null,
         realUEByCode: new Map(),
       };
       semesterContexts.set(semId, ctx);
@@ -1352,8 +1356,7 @@ ${body}
     // divides the semester average and every credits-earned figure by zero.
     const getOrCreatePlaceholderUE = async (semId: string, ctx: SemesterCtx) => {
       if (ctx.placeholderUE) return ctx.placeholderUE;
-      const existing = await this.prisma.uE.findFirst({ where: { semesterId: semId, name: 'À classer' } });
-      ctx.placeholderUE = existing ?? await this.prisma.uE.create({ data: { name: 'À classer', credits: 0, semesterId: semId } });
+      ctx.placeholderUE = await this.prisma.uE.create({ data: { name: 'À classer', credits: 0, semesterId: semId } });
       return ctx.placeholderUE;
     };
     const getOrCreateRealUE = async (semId: string, ctx: SemesterCtx, code: string, name: string, credits: number) => {
@@ -1363,6 +1366,41 @@ ${body}
       const ue = existing ?? await this.prisma.uE.create({ data: { code, name, credits, semesterId: semId } });
       ctx.realUEByCode.set(code, ue);
       return ue;
+    };
+
+    // Subjects created before this run's fixes (or before this file's own recap sheet was
+    // read) can still be sitting in an "À classer" placeholder — anywhere, not necessarily
+    // under the semester this import now resolves them to (an earlier code version could
+    // easily have filed an S6 subject under S5's placeholder before per-sheet semester
+    // detection existed). A placeholder subject has no real semantic home by definition, so
+    // it's fair game to move to wherever it truly belongs the moment that's known — global,
+    // not scoped to one semester's context, and removed from here once moved so a later sheet
+    // with the same name in a genuinely different semester doesn't also try to claim it.
+    const unclassifiedByName = new Map<string, { id: string; name: string; credits: number; ueId: string }>(
+      (await this.prisma.subject.findMany({ where: { ue: { name: 'À classer' } } }))
+        .map((s) => [this.normalizeText(s.name), s]),
+    );
+    const migrateSubject = async (
+      subj: { id: string; credits: number; ueId: string },
+      sheetSemesterId: string,
+      ctx: SemesterCtx,
+      subjectRef: string,
+    ) => {
+      const info = realSubjectInfo.get(this.normalizeText(subjectRef));
+      const targetUE = info
+        ? await getOrCreateRealUE(sheetSemesterId, ctx, info.ueCode, info.ueName, realUeInfo.get(info.ueCode)?.credits ?? info.credits)
+        : await getOrCreatePlaceholderUE(sheetSemesterId, ctx);
+      if (targetUE.id === subj.ueId) return subj; // already exactly where it belongs
+      const data = info ? { ueId: targetUE.id, credits: info.credits, coefficient: info.coefficient } : { ueId: targetUE.id };
+      const updated = await this.prisma.subject.update({ where: { id: subj.id }, data });
+      await this.prisma.uE.update({ where: { id: subj.ueId }, data: { credits: { decrement: subj.credits ?? 0 } } });
+      if (!info) {
+        // Moving between two placeholders (different semester) still needs the destination's
+        // running total kept in sync — the "real UE" branch already got its own credits value
+        // at creation/lookup time, nothing to add there.
+        await this.prisma.uE.update({ where: { id: targetUE.id }, data: { credits: { increment: subj.credits ?? 0 } } });
+      }
+      return updated;
     };
 
     const NON_RELEVE_SHEET = ExportsService.NON_RELEVE_SHEET;
@@ -1391,6 +1429,34 @@ ${body}
       const ctx = await getSemesterContext(sheetSemesterId);
 
       let subject = ctx.subjectById.get(subjectRef) ?? ctx.subjectByName.get(this.normalizeText(subjectRef));
+      const normalizedSubjectRef = this.normalizeText(subjectRef);
+
+      if (subject && ctx.placeholderUE && subject.ueId === ctx.placeholderUE.id) {
+        // Already in this sheet's own semester, but still unclassified from an earlier
+        // import — heal it in place now that a recap sheet may say where it really belongs.
+        try {
+          subject = await migrateSubject(subject, sheetSemesterId, ctx, subjectRef);
+          ctx.subjectById.set(subject.id, subject);
+          ctx.subjectByName.set(normalizedSubjectRef, subject);
+        } catch {
+          // best-effort — keep using the subject as-is if the migration itself fails
+        }
+      } else if (!subject) {
+        const unclassified = unclassifiedByName.get(normalizedSubjectRef);
+        if (unclassified) {
+          // Sitting in a placeholder under a DIFFERENT (possibly wrongly-detected-at-the-time)
+          // semester entirely — move it here instead of creating a duplicate.
+          try {
+            subject = await migrateSubject(unclassified, sheetSemesterId, ctx, subjectRef);
+            ctx.subjectById.set(subject.id, subject);
+            ctx.subjectByName.set(normalizedSubjectRef, subject);
+            unclassifiedByName.delete(normalizedSubjectRef);
+          } catch {
+            subject = undefined; // fall through to normal creation below
+          }
+        }
+      }
+
       if (!subject) {
         try {
           const info = realSubjectInfo.get(this.normalizeText(subjectRef));
