@@ -152,10 +152,25 @@ export class AcademicService {
     return this.prisma.uE.update({ where: { id }, data: dto });
   }
 
+  // Neither Grade->Subject, Attendance->Subject nor Subject->UE cascade at the database
+  // level (no onDelete: Cascade in schema.prisma) — a naive delete on a UE or Subject that
+  // still has any of those attached would just throw a foreign-key constraint error. Both
+  // deletes are genuinely destructive/hard-to-reverse actions an admin does deliberately
+  // (the frontend's confirm() already says "et toutes ses matières" for a UE), so this
+  // explicitly deletes the dependent rows first, all in one transaction so a failure partway
+  // through leaves nothing half-deleted.
   async deleteUE(id: string) {
-    const ue = await this.prisma.uE.findUnique({ where: { id } });
+    const ue = await this.prisma.uE.findUnique({ where: { id }, include: { subjects: true } });
     if (!ue) throw new NotFoundException('UE not found');
-    return this.prisma.uE.delete({ where: { id } });
+
+    const subjectIds = ue.subjects.map((s) => s.id);
+    await this.prisma.$transaction([
+      this.prisma.grade.deleteMany({ where: { subjectId: { in: subjectIds } } }),
+      this.prisma.attendance.deleteMany({ where: { subjectId: { in: subjectIds } } }),
+      this.prisma.subject.deleteMany({ where: { ueId: id } }),
+      this.prisma.uE.delete({ where: { id } }),
+    ]);
+    return { deleted: true, subjectsDeleted: subjectIds.length };
   }
 
   async updateSubject(id: string, dto: any) {
@@ -167,6 +182,12 @@ export class AcademicService {
   async deleteSubject(id: string) {
     const subj = await this.prisma.subject.findUnique({ where: { id } });
     if (!subj) throw new NotFoundException('Subject not found');
-    return this.prisma.subject.delete({ where: { id } });
+
+    await this.prisma.$transaction([
+      this.prisma.grade.deleteMany({ where: { subjectId: id } }),
+      this.prisma.attendance.deleteMany({ where: { subjectId: id } }),
+      this.prisma.subject.delete({ where: { id } }),
+    ]);
+    return { deleted: true };
   }
 }
